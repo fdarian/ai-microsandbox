@@ -75,7 +75,17 @@ export class MicrosandboxNetworkSession
 		}
 		this.defaultWorkingDirectory = workdir;
 
-		const publishedPorts = input.config.network?.ports ?? [];
+		const publishedPorts = input.config.network?.ports;
+		if (!Array.isArray(publishedPorts)) {
+			// Same inferred-shape uncertainty as `workdir` above — be consistent
+			// and throw rather than silently degrading into a misleading "Port X
+			// is not exposed" error later. This is distinct from a legitimately
+			// empty array: the cloud backend always reports `network.ports: []`
+			// (present, valid, zero entries), which must keep working.
+			throw new Error(
+				`microsandbox sandbox "${input.sandbox.name}" did not report a "network.ports" array from Sandbox.config() (got ${JSON.stringify(publishedPorts)}). This is required to resolve the harness sandbox contract's \`ports\`/\`getPortUrl\`.`,
+			);
+		}
 		this.ports = [...new Set(publishedPorts.map((port) => port.guestPort))];
 		// getPortUrl only resolves TCP forwards; a UDP-only guest port is not a
 		// URL-addressable resource, so it's excluded from this map (but still
@@ -102,6 +112,23 @@ export class MicrosandboxNetworkSession
 	}): Promise<MicrosandboxNetworkSession> {
 		const config = (await input.sandbox.config()) as MicrosandboxRuntimeConfig;
 		return new MicrosandboxNetworkSession({ ...input, config });
+	}
+
+	/**
+	 * Overrides the base `MicrosandboxSession.description` to include the
+	 * infra detail this class has and the contract's doc comment asks for
+	 * (root directory, exposed ports) — `restricted()`'s plain session doesn't
+	 * carry that data, so it keeps the base description.
+	 */
+	override get description(): string {
+		return [
+			`microsandbox sandbox (name: ${this.sandbox.name}).`,
+			`Working directory: ${this.defaultWorkingDirectory}.`,
+			this.ports.length > 0
+				? `Exposed ports: ${this.ports.join(', ')}.`
+				: 'No ports exposed.',
+			'Filesystem changes persist for the lifetime of the sandbox.',
+		].join('\n');
 	}
 
 	restricted(): SandboxSession {

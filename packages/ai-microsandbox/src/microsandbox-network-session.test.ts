@@ -1,5 +1,6 @@
-import { describe, expect, it, mock } from 'bun:test';
+import { afterEach, describe, expect, it, mock } from 'bun:test';
 import type { Sandbox } from 'microsandbox';
+import * as realMicrosandbox from 'microsandbox';
 import { MicrosandboxNetworkSession } from './microsandbox-network-session';
 import { MicrosandboxSession } from './microsandbox-session';
 
@@ -183,6 +184,10 @@ describe('MicrosandboxNetworkSession', () => {
 	});
 
 	describe('stop/destroy', () => {
+		afterEach(() => {
+			mock.restore();
+		});
+
 		it('stop() is a no-op when the session does not own the sandbox lifecycle', async () => {
 			const { sandbox, spies } = makeMockSandbox();
 			const session = await MicrosandboxNetworkSession.create({
@@ -211,6 +216,67 @@ describe('MicrosandboxNetworkSession', () => {
 			});
 			await session.destroy();
 			expect(spies.stop).not.toHaveBeenCalled();
+		});
+
+		it('destroy() stops then removes the sandbox when it owns the lifecycle', async () => {
+			const remove = mock(async (_name: string) => {});
+			mock.module('microsandbox', () => ({
+				...realMicrosandbox,
+				Sandbox: { ...realMicrosandbox.Sandbox, remove },
+			}));
+
+			const { sandbox, spies } = makeMockSandbox({ name: 'sbx_owned' });
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+			await session.destroy();
+
+			expect(spies.stop).toHaveBeenCalledTimes(1);
+			expect(remove).toHaveBeenCalledWith('sbx_owned');
+		});
+
+		it('destroy() still removes the sandbox even when stop() rejects', async () => {
+			const remove = mock(async (_name: string) => {});
+			mock.module('microsandbox', () => ({
+				...realMicrosandbox,
+				Sandbox: { ...realMicrosandbox.Sandbox, remove },
+			}));
+
+			const stop = mock(async () => {
+				throw new Error('already stopped');
+			});
+			const sandbox = {
+				name: 'sbx_swallow',
+				config: mock(async () => ({
+					runtime: { workdir: '/root' },
+					network: { ports: [] },
+				})),
+				stop,
+				exec: mock(async () => ({})),
+				fs: mock(() => ({})),
+			} as unknown as Sandbox;
+
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+			await session.destroy();
+
+			expect(stop).toHaveBeenCalledTimes(1);
+			expect(remove).toHaveBeenCalledWith('sbx_swallow');
+		});
+	});
+
+	describe('description', () => {
+		it('includes the working directory and exposed ports', async () => {
+			const { sandbox } = makeMockSandbox();
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+			expect(session.description).toContain('/root');
+			expect(session.description).toContain('3000, 8080, 5353');
 		});
 	});
 });
