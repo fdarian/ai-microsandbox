@@ -171,6 +171,42 @@ describe('MicrosandboxProvider', () => {
 			await session.stop();
 			expect(sandbox.stop).not.toHaveBeenCalled();
 		});
+
+		it('wraps an auth-shaped failure from Sandbox.get into HarnessSandboxAuthenticationError', async () => {
+			const { HttpError } = realMicrosandbox;
+			const getSpy = mock(async (_name: string) => {
+				throw new HttpError('request failed: 401 Unauthorized');
+			});
+			mockSandboxStatics({ get: getSpy });
+			const { createMicrosandbox } = await importProvider();
+			const { HarnessSandboxAuthenticationError } = await import(
+				'@ai-sdk/harness'
+			);
+
+			const provider = createMicrosandbox({});
+			await expect(
+				provider.resumeSession({ sessionId: 'get-auth-fail' }),
+			).rejects.toBeInstanceOf(HarnessSandboxAuthenticationError);
+		});
+
+		it('wraps an auth-shaped failure from handle.connect() into HarnessSandboxAuthenticationError', async () => {
+			const { HttpError } = realMicrosandbox;
+			const connect = mock(async () => {
+				throw new HttpError('request failed: 403 Forbidden');
+			});
+			const getSpy = mock(async (_name: string) => ({ connect }));
+			mockSandboxStatics({ get: getSpy });
+			const { createMicrosandbox } = await importProvider();
+			const { HarnessSandboxAuthenticationError } = await import(
+				'@ai-sdk/harness'
+			);
+
+			const provider = createMicrosandbox({});
+			await expect(
+				provider.resumeSession({ sessionId: 'connect-auth-fail' }),
+			).rejects.toBeInstanceOf(HarnessSandboxAuthenticationError);
+			expect(connect).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	describe('authentication error mapping', () => {
