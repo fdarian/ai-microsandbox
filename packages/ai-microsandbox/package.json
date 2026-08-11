@@ -1,0 +1,58 @@
+{
+	"name": "ai-microsandbox",
+	"version": "0.0.0",
+	"description": "AI SDK v5 harness sandbox adapter backed by microsandbox",
+	"type": "module",
+	"sideEffects": false,
+	"engines": {
+		"node": ">=22"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"default": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"publishConfig": {
+		"access": "public",
+		"provenance": true
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/fdarian/ai-microsandbox.git",
+		"directory": "packages/ai-microsandbox"
+	},
+	"license": "MIT",
+	"scripts": {
+		"build": "tsup --config tsup.config.ts",
+		"check:type": "tsc --noEmit",
+		"check:lint": "biome check",
+		"test": "bun test",
+		"prepack": "bun run build",
+		"ci:version": "changeset version",
+		"ci:release": "changeset publish"
+	},
+	"dependencies": {
+		"@ai-sdk/provider-utils": "5.0.26"
+	},
+	"peerDependencies": {
+		"@ai-sdk/harness": "^1.0.65",
+		"microsandbox": "^0.6.8"
+	},
+	"devDependencies": {
+		"@ai-sdk/harness": "1.0.65",
+		"@total-typescript/tsconfig": "1.0.4",
+		"microsandbox": "0.6.8",
+		"tsup": "8.5.1",
+		"typescript": "5.9.3"
+	}
+}
