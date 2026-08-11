@@ -47,13 +47,33 @@ type FsSpies = {
 	writeStream: ReturnType<typeof mock>;
 };
 
+/** Fake `ExecOutput`: defaults to a successful, silent exit. */
+function makeExecOutput(
+	overrides: {
+		success?: boolean;
+		code?: number;
+		stderr?: string;
+		stdout?: string;
+	} = {},
+) {
+	const success = overrides.success ?? true;
+	return {
+		success,
+		code: overrides.code ?? (success ? 0 : 1),
+		stderr: () => overrides.stderr ?? '',
+		stdout: () => overrides.stdout ?? '',
+	};
+}
+
 /** Builds a fake `Sandbox`. Only the members `MicrosandboxSession` touches are implemented. */
 function makeMockSandbox(overrides: { name?: string } = {}) {
 	const execStreamWith = mock(
 		async (_cmd: string, _configure: (builder: unknown) => unknown) =>
 			makeExecHandle([]).handle,
 	);
-	const exec = mock(async (_cmd: string, _args?: Iterable<string>) => ({}));
+	const exec = mock(async (_cmd: string, _args?: Iterable<string>) =>
+		makeExecOutput(),
+	);
 
 	const fsSpies: FsSpies = {
 		read: mock(async (_path: string) => new Uint8Array()),
@@ -118,6 +138,38 @@ describe('MicrosandboxSession', () => {
 			expect(stderr).toBe('err\n');
 			expect(result.exitCode).toBe(0);
 			expect(process.pid).toBe(42);
+		});
+
+		it('builds the exec options as `-c <command>`, in order', async () => {
+			const { sandbox, spies } = makeMockSandbox();
+			spies.execStreamWith.mockResolvedValueOnce(
+				makeExecHandle([{ kind: 'exited', code: 0 }]).handle,
+			);
+
+			const argCalls: string[] = [];
+			const builder = {
+				arg: mock(function (this: unknown, value: string) {
+					argCalls.push(value);
+					return this;
+				}),
+				cwd: mock(function (this: unknown) {
+					return this;
+				}),
+				envs: mock(function (this: unknown) {
+					return this;
+				}),
+			};
+
+			await new MicrosandboxSession(sandbox).spawn({
+				command: 'echo "hi there"',
+			});
+
+			const [, configure] = spies.execStreamWith.mock.calls[0] as [
+				string,
+				(b: typeof builder) => unknown,
+			];
+			configure(builder);
+			expect(argCalls).toEqual(['-c', 'echo "hi there"']);
 		});
 
 		it('forwards workingDirectory and env through the exec options builder', async () => {
@@ -219,6 +271,35 @@ describe('MicrosandboxSession', () => {
 			await expect(process.wait()).rejects.toThrow('user cancelled');
 			expect(kill).toHaveBeenCalledTimes(1);
 		});
+
+		it('kills the process when aborted while execStreamWith is still in flight', async () => {
+			// This is the race the abort listener has to close: nothing exists to
+			// listen for 'abort' until `execStreamWith` resolves, so an abort
+			// fired *during* that round trip must still result in a kill once the
+			// handle is available — not be silently missed.
+			const { sandbox, spies } = makeMockSandbox();
+			const { handle, spies: handleSpies } = makeExecHandle([]);
+			let resolveExecStreamWith: (h: ExecHandle) => void = () => {};
+			const pending = new Promise<ExecHandle>((resolve) => {
+				resolveExecStreamWith = resolve;
+			});
+			spies.execStreamWith.mockImplementationOnce(() => pending);
+
+			const ac = new AbortController();
+			const spawnPromise = new MicrosandboxSession(sandbox).spawn({
+				command: 'sleep 10',
+				abortSignal: ac.signal,
+			});
+
+			// Fires synchronously; at this point `execStreamWith`'s promise is
+			// still pending, so under the old implementation nothing was
+			// listening yet.
+			ac.abort(new Error('cancelled mid-flight'));
+			resolveExecStreamWith(handle);
+			await spawnPromise;
+
+			expect(handleSpies.kill).toHaveBeenCalledTimes(1);
+		});
 	});
 
 	describe('run', () => {
@@ -236,6 +317,28 @@ describe('MicrosandboxSession', () => {
 				command: 'echo hi',
 			});
 			expect(result).toEqual({ exitCode: 3, stdout: 'hi\n', stderr: 'oops\n' });
+		});
+
+		it('closes the same execStreamWith-in-flight abort race as spawn()', async () => {
+			const { sandbox, spies } = makeMockSandbox();
+			const { handle, spies: handleSpies } = makeExecHandle([]);
+			let resolveExecStreamWith: (h: ExecHandle) => void = () => {};
+			const pending = new Promise<ExecHandle>((resolve) => {
+				resolveExecStreamWith = resolve;
+			});
+			spies.execStreamWith.mockImplementationOnce(() => pending);
+
+			const ac = new AbortController();
+			const runPromise = new MicrosandboxSession(sandbox).run({
+				command: 'sleep 10',
+				abortSignal: ac.signal,
+			});
+
+			ac.abort(new Error('cancelled mid-flight'));
+			resolveExecStreamWith(handle);
+
+			await expect(runPromise).rejects.toThrow('cancelled mid-flight');
+			expect(handleSpies.kill).toHaveBeenCalledTimes(1);
 		});
 	});
 
@@ -295,6 +398,25 @@ describe('MicrosandboxSession', () => {
 
 			expect(spies.exec).toHaveBeenCalledWith('mkdir', ['-p', '/work/sub']);
 			expect(spies.fs.write).toHaveBeenCalledWith('/work/sub/file.bin', bytes);
+		});
+
+		it('writeBinaryFile throws with the captured stderr when mkdir -p fails', async () => {
+			const { sandbox, spies } = makeMockSandbox();
+			spies.exec.mockResolvedValueOnce(
+				makeExecOutput({
+					success: false,
+					code: 1,
+					stderr: 'mkdir: Read-only file system',
+				}),
+			);
+
+			await expect(
+				new MicrosandboxSession(sandbox).writeBinaryFile({
+					path: '/readonly/sub/file.bin',
+					content: new Uint8Array([1]),
+				}),
+			).rejects.toThrow(/Read-only file system/);
+			expect(spies.fs.write).not.toHaveBeenCalled();
 		});
 
 		it('writeBinaryFile skips mkdir for a top-level path', async () => {

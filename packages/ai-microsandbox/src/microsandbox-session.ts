@@ -74,18 +74,47 @@ export class MicrosandboxSession implements SandboxSession {
 	}): Promise<SandboxProcess> {
 		abortSignal?.throwIfAborted();
 
-		// The contract's `command` is a shell string; microsandbox's `shellStream`
-		// doesn't accept a `cwd`/`env` options argument, so run it explicitly as
-		// `sh -c <command>` through `execStreamWith`, which does.
-		const handle = await this.sandbox.execStreamWith('sh', (builder) => {
-			let configured = builder.arg('-c').arg(command);
-			if (workingDirectory !== undefined)
-				configured = configured.cwd(workingDirectory);
-			if (env !== undefined) configured = configured.envs(env);
-			return configured;
-		});
+		// Registered before the `execStreamWith` round trip below, not after it
+		// resolves: an `AbortSignal` fires 'abort' at most once, to whoever is
+		// listening at that instant. Registering only once `handle` exists (as
+		// `createSandboxProcess` used to) leaves a window where an abort during
+		// the round trip has no listener and is silently missed — the process
+		// then runs to completion server-side despite the caller cancelling.
+		let handle: ExecHandle | undefined;
+		let abortedBeforeHandleReady = false;
+		const onAbort = () => {
+			if (handle == null) {
+				abortedBeforeHandleReady = true;
+				return;
+			}
+			void handle.kill().catch(() => {});
+		};
+		abortSignal?.addEventListener('abort', onAbort, { once: true });
 
-		return createSandboxProcess(handle, abortSignal);
+		try {
+			// The contract's `command` is a shell string; microsandbox's
+			// `shellStream` doesn't accept a `cwd`/`env` options argument, so run
+			// it explicitly as `sh -c <command>` through `execStreamWith`, which
+			// does.
+			handle = await this.sandbox.execStreamWith('sh', (builder) => {
+				let configured = builder.arg('-c').arg(command);
+				if (workingDirectory !== undefined)
+					configured = configured.cwd(workingDirectory);
+				if (env !== undefined) configured = configured.envs(env);
+				return configured;
+			});
+		} catch (error) {
+			abortSignal?.removeEventListener('abort', onAbort);
+			throw error;
+		}
+
+		if (abortedBeforeHandleReady) {
+			// `onAbort` fired while `handle` was still unassigned and no-opped;
+			// kill now that we have a handle to kill.
+			await handle.kill().catch(() => {});
+		}
+
+		return createSandboxProcess(handle, abortSignal, onAbort);
 	}
 
 	async readFile({
@@ -201,7 +230,16 @@ export class MicrosandboxSession implements SandboxSession {
 	private async ensureParentDirectory(path: string): Promise<void> {
 		const parent = posix.dirname(path);
 		if (parent === '.' || parent === '/' || parent === '') return;
-		await this.sandbox.exec('mkdir', ['-p', parent]);
+		// `exec()` resolves with an `ExecOutput` regardless of the command's own
+		// exit status — it only rejects on an exec-launch failure — so a `mkdir
+		// -p` that fails (read-only filesystem, permission denied on an
+		// ancestor, ...) must be checked explicitly or it's silently swallowed.
+		const result = await this.sandbox.exec('mkdir', ['-p', parent]);
+		if (!result.success) {
+			throw new Error(
+				`Failed to create parent directory "${parent}" for "${path}" (mkdir -p exited ${result.code}): ${result.stderr()}`,
+			);
+		}
 	}
 }
 
@@ -210,10 +248,15 @@ export class MicrosandboxSession implements SandboxSession {
  * `started`/`stdout`/`stderr`/`exited` events) into the two independent
  * `ReadableStream<Uint8Array>`s the `SandboxProcess` contract expects, mirroring
  * `createSandboxProcess` in `@ai-sdk/sandbox-vercel`.
+ *
+ * `onAbort` is registered by the caller (`spawn()`), before `handle` even
+ * exists, to close the race described there — this function only owns
+ * detaching it once the process is fully drained.
  */
 function createSandboxProcess(
 	handle: ExecHandle,
 	abortSignal: AbortSignal | undefined,
+	onAbort: () => void,
 ): SandboxProcess {
 	let pid: number | undefined;
 	let exitCode: number | undefined;
@@ -233,11 +276,6 @@ function createSandboxProcess(
 			controllers.stderr = controller;
 		},
 	});
-
-	const onAbort = () => {
-		void handle.kill();
-	};
-	abortSignal?.addEventListener('abort', onAbort, { once: true });
 
 	const drained = (async () => {
 		try {
