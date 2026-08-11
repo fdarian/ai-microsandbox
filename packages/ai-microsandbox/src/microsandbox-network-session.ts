@@ -3,28 +3,35 @@ import {
 	type HarnessV1NetworkSandboxSession,
 } from '@ai-sdk/harness';
 import type { Experimental_SandboxSession as SandboxSession } from '@ai-sdk/provider-utils';
-import { Sandbox } from 'microsandbox';
+import { defaultBackendKind, Sandbox } from 'microsandbox';
 import { MicrosandboxSession } from './microsandbox-session';
 
 const PROVIDER_ID = 'microsandbox';
 
 /**
  * Runtime shape read back from `Sandbox.config()`. The installed microsandbox
- * types declare `SandboxConfig` as a bare `Record<string, unknown>` (see
- * `NapiSandboxConfig` in `internal/napi.d.ts`) — there is no typed response
- * schema for the live config readback. This shape is inferred from the
- * builder/modify setter names (`workdir`) and the `NetworkConfig`/
- * `PublishedPort` types (`network.ports[].{hostPort,guestPort}`) that the
- * same camelCase-remapping convention produces elsewhere in the SDK, not
- * from a documented return type. Treat it as best-effort.
+ * types declare `SandboxConfig` as a bare `Record<string, unknown>` — there is
+ * no typed accessor (`SandboxBuilder.build()` returns the same alias, and the
+ * package ships no generated bindings for it), so this interface plus the
+ * single cast in `create()` below is the correct approach rather than typing
+ * this properly.
+ *
+ * This mirrors the actual snake_case-to-camelCase-remapped JSON the native
+ * side emits: the working directory lives at `runtime.workdir` (not a
+ * top-level `workdir` key), and published ports live at `network.ports[]`.
+ * `runtime.workdir` is `string | null` — `null` when the sandbox's image
+ * declares no `WORKDIR` (or a bare rootfs was used), not a missing-field
+ * error. The cloud backend's wire type carries no ports field at all, so
+ * `network.ports` is always `[]` there regardless of what was configured.
  */
 type MicrosandboxRuntimeConfig = {
-	workdir?: string;
+	runtime?: { workdir?: string | null };
 	network?: {
 		ports?: ReadonlyArray<{
 			hostPort: number;
 			guestPort: number;
 			protocol: 'tcp' | 'udp';
+			hostBind: string;
 		}>;
 	};
 };
@@ -46,7 +53,10 @@ export class MicrosandboxNetworkSession
 	readonly defaultWorkingDirectory: string;
 	readonly ports: ReadonlyArray<number>;
 	private readonly ownsLifecycle: boolean;
-	private readonly hostPortByGuestPort: ReadonlyMap<number, number>;
+	private readonly tcpPortByGuestPort: ReadonlyMap<
+		number,
+		{ hostPort: number; hostBind: string }
+	>;
 
 	private constructor(input: {
 		sandbox: Sandbox;
@@ -57,18 +67,26 @@ export class MicrosandboxNetworkSession
 		this.ownsLifecycle = input.ownsLifecycle;
 		this.id = input.sandbox.name;
 
-		const workdir = input.config.workdir;
-		if (typeof workdir !== 'string' || workdir.length === 0) {
+		const workdir = input.config.runtime?.workdir;
+		if (workdir == null) {
 			throw new Error(
-				`Could not determine the default working directory for microsandbox sandbox "${input.sandbox.name}": Sandbox.config() did not expose a "workdir" field. This is required by the harness sandbox contract and cannot be safely defaulted.`,
+				`microsandbox sandbox "${input.sandbox.name}" has no working directory configured — its image declares no WORKDIR (or a bare rootfs was used). Set one explicitly via configure: builder => builder.workdir('/some/path') when creating the sandbox; the harness sandbox contract requires a concrete defaultWorkingDirectory.`,
 			);
 		}
 		this.defaultWorkingDirectory = workdir;
 
 		const publishedPorts = input.config.network?.ports ?? [];
-		this.ports = publishedPorts.map((port) => port.guestPort);
-		this.hostPortByGuestPort = new Map(
-			publishedPorts.map((port) => [port.guestPort, port.hostPort]),
+		this.ports = [...new Set(publishedPorts.map((port) => port.guestPort))];
+		// getPortUrl only resolves TCP forwards; a UDP-only guest port is not a
+		// URL-addressable resource, so it's excluded from this map (but still
+		// shows up in `ports`, which just reflects what's published).
+		this.tcpPortByGuestPort = new Map(
+			publishedPorts
+				.filter((port) => port.protocol === 'tcp')
+				.map((port) => [
+					port.guestPort,
+					{ hostPort: port.hostPort, hostBind: port.hostBind },
+				]),
 		);
 	}
 
@@ -91,28 +109,34 @@ export class MicrosandboxNetworkSession
 	}
 
 	/**
-	 * Resolves a sandbox-exposed port to a URL.
+	 * Resolves a sandbox-exposed TCP port to a URL.
 	 *
 	 * microsandbox has no public URL or tunneling concept: `.port(hostPort,
-	 * guestPort)` on the builder only creates a host<->guest TCP forward bound
-	 * to `127.0.0.1` by default. This method resolves the guest port's mapped
-	 * host port and returns `<protocol>://127.0.0.1:<hostPort>` — the result is
-	 * only reachable from the machine running this Node process, never a public
-	 * URL.
+	 * guestPort)` on the builder only creates a host<->guest forward, bound to
+	 * that port's `hostBind` (`127.0.0.1` unless the sandbox was configured
+	 * with `.portBind(...)`/`.portUdpBind(...)`). This method resolves the
+	 * guest port's mapping and returns `<protocol>://<hostBind>:<hostPort>` —
+	 * reachable only from wherever that bind address routes to, never a public
+	 * URL. A UDP-only guest port is treated as unmapped, since it isn't
+	 * URL-addressable. On the cloud backend `network.ports` is always empty (its
+	 * wire type has no ports field), so this always throws there.
 	 */
 	getPortUrl = async (options: {
 		port: number;
 		protocol?: 'http' | 'https' | 'ws';
 	}): Promise<string> => {
-		const hostPort = this.hostPortByGuestPort.get(options.port);
-		if (hostPort == null) {
+		const mapped = this.tcpPortByGuestPort.get(options.port);
+		if (mapped == null) {
 			throw new HarnessCapabilityUnsupportedError({
 				harnessId: PROVIDER_ID,
-				message: `Port ${options.port} is not exposed on this sandbox. Exposed ports: [${this.ports.join(', ')}].`,
+				message: buildUnmappedPortMessage({
+					port: options.port,
+					exposedPorts: this.ports,
+				}),
 			});
 		}
 		const protocol = options.protocol ?? 'http';
-		return `${protocol}://127.0.0.1:${hostPort}`;
+		return `${protocol}://${mapped.hostBind}:${mapped.hostPort}`;
 	};
 
 	stop = async (): Promise<void> => {
@@ -125,4 +149,19 @@ export class MicrosandboxNetworkSession
 		await this.sandbox.stop().catch(() => {});
 		await Sandbox.remove(this.sandbox.name);
 	};
+}
+
+function buildUnmappedPortMessage(input: {
+	port: number;
+	exposedPorts: ReadonlyArray<number>;
+}): string {
+	const base = `Port ${input.port} is not exposed on this sandbox. Exposed ports: [${input.exposedPorts.join(', ')}].`;
+	// `defaultBackendKind()` reflects the process-wide active backend, which may
+	// have changed since this sandbox was created (there's no per-instance
+	// accessor in the installed types) — best-effort context, not a guarantee
+	// about this specific sandbox's backend.
+	if (defaultBackendKind() === 'cloud') {
+		return `${base} The active default backend is "cloud" — microsandbox cloud sandboxes never report published ports (network.ports is always empty there), so getPortUrl cannot succeed against one.`;
+	}
+	return base;
 }

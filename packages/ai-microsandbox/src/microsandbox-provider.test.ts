@@ -5,7 +5,10 @@ import * as realMicrosandbox from 'microsandbox';
 function makeFakeSandbox(name: string) {
 	return {
 		name,
-		config: mock(async () => ({ workdir: '/root', network: { ports: [] } })),
+		config: mock(async () => ({
+			runtime: { workdir: '/root' },
+			network: { ports: [] },
+		})),
 		stop: mock(async () => {}),
 		exec: mock(async () => ({})),
 		fs: mock(() => ({})),

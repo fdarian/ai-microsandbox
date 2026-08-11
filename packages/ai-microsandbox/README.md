@@ -61,17 +61,26 @@ const provider = createMicrosandbox({
 });
 ```
 
+Some images declare no `WORKDIR` (a bare rootfs, or an OCI image without one) — microsandbox then has no default working directory at all, and `createSession()`/`resumeSession()` throw rather than guessing one. Set it explicitly:
+
+```ts
+const provider = createMicrosandbox({
+  image: 'scratch',
+  configure: builder => builder.workdir('/'),
+});
+```
+
 ## Ports
 
 Port publishing is fixed at sandbox creation time (via `configure`'s `.port(hostPort, guestPort)`); this adapter has no way to change it mid-session (`setPorts` is unimplemented).
 
-`getPortUrl` resolves a published guest port to a URL. microsandbox has no public URL or tunnel — `.port()` only forwards a host port to a guest port over `127.0.0.1` — so the URL it returns is a loopback address, reachable only from the machine running your Node process:
+`getPortUrl` resolves a published TCP guest port to a URL. microsandbox has no public URL or tunnel — `.port()` only forwards a host port to a guest port over the bind address the mapping was created with (`127.0.0.1` unless you passed `.portBind(...)`) — so the URL it returns is only reachable from wherever that bind address routes to, typically the machine running your Node process:
 
 ```ts
 const url = await networkSession.getPortUrl({ port: 80 }); // "http://127.0.0.1:<hostPort>"
 ```
 
-Requesting a port that wasn't published throws `HarnessCapabilityUnsupportedError`.
+Requesting a port that wasn't published — including a port only published over UDP — throws `HarnessCapabilityUnsupportedError`. **This always throws on the cloud backend**: its wire type carries no ports field at all, so published ports are structurally local-only regardless of what `configure` set.
 
 ## Backend
 

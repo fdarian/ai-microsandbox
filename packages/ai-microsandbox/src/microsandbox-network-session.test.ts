@@ -9,11 +9,27 @@ function makeMockSandbox(
 	const config = mock(
 		async () =>
 			overrides.config ?? {
-				workdir: '/root',
+				runtime: { workdir: '/root' },
 				network: {
 					ports: [
-						{ hostPort: 41111, guestPort: 3000, protocol: 'tcp' },
-						{ hostPort: 41112, guestPort: 8080, protocol: 'tcp' },
+						{
+							hostPort: 41111,
+							guestPort: 3000,
+							protocol: 'tcp',
+							hostBind: '127.0.0.1',
+						},
+						{
+							hostPort: 41112,
+							guestPort: 8080,
+							protocol: 'tcp',
+							hostBind: '127.0.0.1',
+						},
+						{
+							hostPort: 41113,
+							guestPort: 5353,
+							protocol: 'udp',
+							hostBind: '127.0.0.1',
+						},
 					],
 				},
 			},
@@ -31,7 +47,7 @@ function makeMockSandbox(
 
 describe('MicrosandboxNetworkSession', () => {
 	describe('create', () => {
-		it('reads defaultWorkingDirectory and ports from Sandbox.config()', async () => {
+		it('reads defaultWorkingDirectory from config.runtime.workdir and ports from config.network.ports', async () => {
 			const { sandbox } = makeMockSandbox();
 			const session = await MicrosandboxNetworkSession.create({
 				sandbox,
@@ -39,10 +55,19 @@ describe('MicrosandboxNetworkSession', () => {
 			});
 			expect(session.id).toBe('sbx_net_test');
 			expect(session.defaultWorkingDirectory).toBe('/root');
-			expect(session.ports).toEqual([3000, 8080]);
+			expect(session.ports).toEqual([3000, 8080, 5353]);
 		});
 
-		it('throws when config() does not expose a workdir', async () => {
+		it('throws when config.runtime.workdir is null (image declares no WORKDIR)', async () => {
+			const { sandbox } = makeMockSandbox({
+				config: { runtime: { workdir: null }, network: { ports: [] } },
+			});
+			await expect(
+				MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: true }),
+			).rejects.toThrow(/working directory/i);
+		});
+
+		it('throws when config has no runtime key at all', async () => {
 			const { sandbox } = makeMockSandbox({
 				config: { network: { ports: [] } },
 			});
@@ -53,7 +78,7 @@ describe('MicrosandboxNetworkSession', () => {
 	});
 
 	describe('getPortUrl', () => {
-		it('resolves a mapped guest port to a loopback URL', async () => {
+		it('resolves a mapped TCP guest port to a URL using its hostBind', async () => {
 			const { sandbox } = makeMockSandbox();
 			const session = await MicrosandboxNetworkSession.create({
 				sandbox,
@@ -73,6 +98,31 @@ describe('MicrosandboxNetworkSession', () => {
 			expect(url).toBe('ws://127.0.0.1:41112');
 		});
 
+		it('reflects a non-default hostBind (e.g. from .portBind(...))', async () => {
+			const { sandbox } = makeMockSandbox({
+				config: {
+					runtime: { workdir: '/root' },
+					network: {
+						ports: [
+							{
+								hostPort: 9000,
+								guestPort: 80,
+								protocol: 'tcp',
+								hostBind: '0.0.0.0',
+							},
+						],
+					},
+				},
+			});
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+			expect(await session.getPortUrl({ port: 80 })).toBe(
+				'http://0.0.0.0:9000',
+			);
+		});
+
 		it('throws HarnessCapabilityUnsupportedError for an unmapped port', async () => {
 			const { HarnessCapabilityUnsupportedError } = await import(
 				'@ai-sdk/harness'
@@ -84,6 +134,36 @@ describe('MicrosandboxNetworkSession', () => {
 			});
 			await expect(session.getPortUrl({ port: 9999 })).rejects.toBeInstanceOf(
 				HarnessCapabilityUnsupportedError,
+			);
+		});
+
+		it('treats a UDP-only guest port as unmapped', async () => {
+			const { sandbox } = makeMockSandbox();
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+			// port 5353 is published, but only over UDP — not URL-addressable.
+			await expect(session.getPortUrl({ port: 5353 })).rejects.toThrow();
+		});
+
+		it('mentions the cloud backend in the error when it is the active default', async () => {
+			const { withDefaultBackend } = await import('microsandbox');
+			const { sandbox } = makeMockSandbox({
+				config: { runtime: { workdir: '/root' }, network: { ports: [] } },
+			});
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+
+			await withDefaultBackend(
+				{ kind: 'cloud', apiKey: 'test-key' },
+				async () => {
+					await expect(session.getPortUrl({ port: 80 })).rejects.toThrow(
+						/cloud/i,
+					);
+				},
 			);
 		});
 	});
