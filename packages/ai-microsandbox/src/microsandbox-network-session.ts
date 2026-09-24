@@ -1,6 +1,7 @@
 import {
 	HarnessCapabilityUnsupportedError,
 	type HarnessV1NetworkSandboxSession,
+	type HarnessV1PortEndpoint,
 } from '@ai-sdk/harness';
 import type { Experimental_SandboxSession as SandboxSession } from '@ai-sdk/provider-utils';
 import { defaultBackendKind, Sandbox } from 'microsandbox';
@@ -83,11 +84,11 @@ export class MicrosandboxNetworkSession
 			// empty array: the cloud backend always reports `network.ports: []`
 			// (present, valid, zero entries), which must keep working.
 			throw new Error(
-				`microsandbox sandbox "${input.sandbox.name}" did not report a "network.ports" array from Sandbox.config() (got ${JSON.stringify(publishedPorts)}). This is required to resolve the harness sandbox contract's \`ports\`/\`getPortUrl\`.`,
+				`microsandbox sandbox "${input.sandbox.name}" did not report a "network.ports" array from Sandbox.config() (got ${JSON.stringify(publishedPorts)}). This is required to resolve the harness sandbox contract's \`ports\`/\`getPortEndpoint\`.`,
 			);
 		}
 		this.ports = [...new Set(publishedPorts.map((port) => port.guestPort))];
-		// getPortUrl only resolves TCP forwards; a UDP-only guest port is not a
+		// Endpoints only resolve TCP forwards; a UDP-only guest port is not a
 		// URL-addressable resource, so it's excluded from this map (but still
 		// shows up in `ports`, which just reflects what's published).
 		this.tcpPortByGuestPort = new Map(
@@ -148,10 +149,10 @@ export class MicrosandboxNetworkSession
 	 * URL-addressable. On the cloud backend `network.ports` is always empty (its
 	 * wire type has no ports field), so this always throws there.
 	 */
-	getPortUrl = async (options: {
+	getPortEndpoint = async (options: {
 		port: number;
 		protocol?: 'http' | 'https' | 'ws';
-	}): Promise<string> => {
+	}): Promise<HarnessV1PortEndpoint> => {
 		const mapped = this.tcpPortByGuestPort.get(options.port);
 		if (mapped == null) {
 			throw new HarnessCapabilityUnsupportedError({
@@ -163,8 +164,13 @@ export class MicrosandboxNetworkSession
 			});
 		}
 		const protocol = options.protocol ?? 'http';
-		return `${protocol}://${mapped.hostBind}:${mapped.hostPort}`;
+		return { url: `${protocol}://${mapped.hostBind}:${mapped.hostPort}` };
 	};
+
+	getPortUrl = async (options: {
+		port: number;
+		protocol?: 'http' | 'https' | 'ws';
+	}): Promise<string> => (await this.getPortEndpoint(options)).url;
 
 	stop = async (): Promise<void> => {
 		if (!this.ownsLifecycle) return;
@@ -188,7 +194,7 @@ function buildUnmappedPortMessage(input: {
 	// accessor in the installed types) — best-effort context, not a guarantee
 	// about this specific sandbox's backend.
 	if (defaultBackendKind() === 'cloud') {
-		return `${base} The active default backend is "cloud" — microsandbox cloud sandboxes never report published ports (network.ports is always empty there), so getPortUrl cannot succeed against one.`;
+		return `${base} The active default backend is "cloud" — microsandbox cloud sandboxes never report published ports (network.ports is always empty there), so getPortEndpoint cannot succeed against one.`;
 	}
 	return base;
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:net';
 import {
 	HarnessSandboxAuthenticationError,
 	type HarnessV1NetworkSandboxSession,
@@ -19,6 +20,8 @@ const SESSION_NAME_PREFIX = 'ai-sdk-harness-session-';
 const DEFAULT_NAME_PREFIX = 'ai-sdk-harness';
 /** microsandbox caps sandbox names at 128 UTF-8 bytes (see `Sandbox.builder`'s doc comment). */
 const MAX_NAME_BYTES = 128;
+const BRIDGE_GUEST_PORT = 8765;
+const pendingHostPorts = new Set<number>();
 
 /**
  * Settings for {@link createMicrosandbox}. Two mutually-exclusive shapes:
@@ -83,12 +86,19 @@ export class MicrosandboxProvider implements HarnessV1SandboxProvider {
 			? sessionSandboxName(options.sessionId)
 			: randomSandboxName(settings.namePrefix);
 
-		const sandbox = await withAuthenticationError(async () => {
-			let builder = Sandbox.builder(name);
-			if (settings.image != null) builder = builder.image(settings.image);
-			if (settings.configure != null) builder = settings.configure(builder);
-			return builder.create();
-		});
+		const hostPort = await allocateHostPort();
+		const sandbox = await (async () => {
+			try {
+				return await withAuthenticationError(async () => {
+					let builder = Sandbox.builder(name).port(hostPort, BRIDGE_GUEST_PORT);
+					if (settings.image != null) builder = builder.image(settings.image);
+					if (settings.configure != null) builder = settings.configure(builder);
+					return builder.create();
+				});
+			} finally {
+				pendingHostPorts.delete(hostPort);
+			}
+		})();
 
 		// microsandbox has no snapshot-based one-time-setup hook that would let
 		// `onFirstCreate`'s side effects be baked into a reusable template:
@@ -124,6 +134,33 @@ export class MicrosandboxProvider implements HarnessV1SandboxProvider {
 		const sandbox = await withAuthenticationError(() => handle.connect());
 		return MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: false });
 	};
+}
+
+async function allocateHostPort(): Promise<number> {
+	for (;;) {
+		const server = createServer();
+		const port = await new Promise<number>((resolve, reject) => {
+			server.once('error', reject);
+			server.listen(0, '127.0.0.1', () => {
+				const address = server.address();
+				if (address == null || typeof address === 'string') {
+					reject(
+						new Error(
+							'Failed to allocate a TCP host port for the harness bridge.',
+						),
+					);
+					return;
+				}
+				resolve(address.port);
+			});
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.close((error) => (error == null ? resolve() : reject(error)));
+		});
+		if (pendingHostPorts.has(port)) continue;
+		pendingHostPorts.add(port);
+		return port;
+	}
 }
 
 function sessionSandboxName(sessionId: string): string {

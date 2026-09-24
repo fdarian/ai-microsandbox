@@ -16,11 +16,14 @@ function makeFakeSandbox(name: string) {
 }
 
 function makeFakeBuilder(sandbox: SandboxType) {
+	const port = mock(function (this: unknown, _host: number, _guest: number) {
+		return this;
+	});
 	const image = mock(function (this: unknown) {
 		return this;
 	});
 	const create = mock(async () => sandbox);
-	return { builder: { image, create }, spies: { image, create } };
+	return { builder: { port, image, create }, spies: { port, image, create } };
 }
 
 /** Re-mocks the `microsandbox` module's `Sandbox` static, keeping every other
@@ -88,8 +91,66 @@ describe('MicrosandboxProvider', () => {
 
 			expect(builderSpy).toHaveBeenCalledWith('ai-sdk-harness-session-abc123');
 			expect(spies.image).toHaveBeenCalledWith('my-image:latest');
+			expect(spies.port.mock.calls[0]?.[1]).toBe(8765);
+			expect(spies.port.mock.calls[0]?.[0]).toBeGreaterThan(0);
 			expect(configure).toHaveBeenCalledWith(builder);
+			expect(spies.port.mock.invocationCallOrder[0]).toBeLessThan(
+				configure.mock.invocationCallOrder[0] as number,
+			);
 			expect(session.id).toBe('ai-sdk-harness-session-abc123');
+		});
+
+		it('allocates distinct host ports for overlapping session creations', async () => {
+			const sandbox = makeFakeSandbox('concurrent');
+			const ports: number[] = [];
+			const builderSpy = mock(() => ({
+				port: mock(function (this: unknown, host: number, guest: number) {
+					expect(guest).toBe(8765);
+					ports.push(host);
+					return this;
+				}),
+				create: mock(async () => {
+					await new Promise((resolve) => setTimeout(resolve, 20));
+					return sandbox;
+				}),
+			}));
+			mockSandboxStatics({ builder: builderSpy });
+			const { createMicrosandbox } = await importProvider();
+			const provider = createMicrosandbox({});
+			await Promise.all([provider.createSession(), provider.createSession()]);
+			expect(ports).toHaveLength(2);
+			expect(new Set(ports).size).toBe(2);
+		});
+
+		it('exposes the published bridge port as the first session endpoint', async () => {
+			const sandbox = makeFakeSandbox('bridge');
+			const builder = makeFakeBuilder(sandbox);
+			const config = sandbox.config as ReturnType<typeof mock>;
+			config.mockImplementation(async () => ({
+				runtime: { workdir: '/root' },
+				network: {
+					ports: [
+						{
+							hostPort: builder.spies.port.mock.calls[0]?.[0],
+							guestPort: 8765,
+							protocol: 'tcp',
+							hostBind: '127.0.0.1',
+						},
+					],
+				},
+			}));
+			mockSandboxStatics({ builder: mock(() => builder.builder) });
+			const { createMicrosandbox } = await importProvider();
+			const session = await createMicrosandbox({}).createSession();
+			expect(session.ports[0]).toBe(8765);
+			expect(
+				await session.getPortEndpoint({
+					port: session.ports[0] as number,
+					protocol: 'ws',
+				}),
+			).toEqual({
+				url: `ws://127.0.0.1:${builder.spies.port.mock.calls[0]?.[0]}`,
+			});
 		});
 
 		it('uses a random namePrefix-based name when no sessionId is given', async () => {
@@ -216,6 +277,9 @@ describe('MicrosandboxProvider', () => {
 				throw new HttpError('request failed: 401 Unauthorized');
 			});
 			const builderSpy = mock(() => ({
+				port: mock(function (this: unknown) {
+					return this;
+				}),
 				image: mock(function (this: unknown) {
 					return this;
 				}),
@@ -239,6 +303,9 @@ describe('MicrosandboxProvider', () => {
 				throw new HttpError('internal server error');
 			});
 			const builderSpy = mock(() => ({
+				port: mock(function (this: unknown) {
+					return this;
+				}),
 				image: mock(function (this: unknown) {
 					return this;
 				}),

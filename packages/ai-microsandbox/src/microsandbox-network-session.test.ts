@@ -79,6 +79,21 @@ describe('MicrosandboxNetworkSession', () => {
 	});
 
 	describe('getPortUrl', () => {
+		it('returns the bridge endpoint and delegates the deprecated URL method', async () => {
+			const { sandbox } = makeMockSandbox();
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+			expect(
+				await session.getPortEndpoint({ port: 3000, protocol: 'ws' }),
+			).toEqual({
+				url: 'ws://127.0.0.1:41111',
+			});
+			expect(await session.getPortUrl({ port: 3000, protocol: 'ws' })).toBe(
+				'ws://127.0.0.1:41111',
+			);
+		});
 		it('resolves a mapped TCP guest port to a URL using its hostBind', async () => {
 			const { sandbox } = makeMockSandbox();
 			const session = await MicrosandboxNetworkSession.create({

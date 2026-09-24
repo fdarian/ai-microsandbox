@@ -31,7 +31,7 @@ await networkSession.stop();
 
 `createMicrosandbox()` is synchronous and performs no I/O; the actual microsandbox `Sandbox` — and the microVM behind it — is created on demand inside `createSession()`.
 
-`networkSession.restricted()` returns the plain `Experimental_SandboxSession` view (file I/O, exec, spawn) that's safe to hand to AI SDK tools accepting `experimental_sandbox`. The network session itself additionally carries the infra surface the harness uses: `ports`, `getPortUrl`, `stop`, `destroy`.
+`networkSession.restricted()` returns the plain `Experimental_SandboxSession` view (file I/O, exec, spawn) that's safe to hand to AI SDK tools accepting `experimental_sandbox`. The network session itself additionally carries the infra surface the harness uses: `ports`, `getPortEndpoint`, `getPortUrl`, `stop`, `destroy`.
 
 ### Wrapping an existing sandbox
 
@@ -61,6 +61,15 @@ const provider = createMicrosandbox({
 });
 ```
 
+To give the guest writable access to a host repository, bind its directory at a guest path. Leave off `.readonly()` and ensure the guest user has filesystem permissions on the host directory:
+
+```ts
+const provider = createMicrosandbox({
+  image: 'python',
+  configure: builder => builder.volume('/workspace/repo', mount => mount.bind('/absolute/path/to/repo')),
+});
+```
+
 Some images declare no `WORKDIR` (a bare rootfs, or an OCI image without one) — microsandbox then has no default working directory at all, and `createSession()`/`resumeSession()` throw rather than guessing one. Set it explicitly:
 
 ```ts
@@ -72,9 +81,11 @@ const provider = createMicrosandbox({
 
 ## Ports
 
-Port publishing is fixed at sandbox creation time (via `configure`'s `.port(hostPort, guestPort)`); this adapter has no way to change it mid-session (`setPorts` is unimplemented).
+Each newly created session publishes guest TCP port **8765** to a free local host port before `configure` runs. The Claude Code, Codex, and OpenCode bridge adapters use the first exposed port by default, so they can connect without caller-side port setup. Concurrent session creations receive different host ports. An adapter configured with an explicit `port` other than 8765 needs that guest port published separately via `configure`. Wrapping an existing sandbox or resuming one uses its existing port map.
 
-`getPortUrl` resolves a published TCP guest port to a URL. microsandbox has no public URL or tunnel — `.port()` only forwards a host port to a guest port over the bind address the mapping was created with (`127.0.0.1` unless you passed `.portBind(...)`) — so the URL it returns is only reachable from wherever that bind address routes to, typically the machine running your Node process:
+Port publishing is fixed at sandbox creation time (via `configure`'s `.port(hostPort, guestPort)` for additional ports); this adapter has no way to change it mid-session (`setPorts` is unimplemented).
+
+`getPortEndpoint` resolves a published TCP guest port to `{ url }` (no additional headers); `getPortUrl` returns that URL for older consumers. microsandbox has no public URL or tunnel — `.port()` only forwards a host port to a guest port over the bind address the mapping was created with (`127.0.0.1` unless you passed `.portBind(...)`) — so the URL is only reachable from wherever that bind address routes to, typically the machine running your Node process:
 
 ```ts
 const url = await networkSession.getPortUrl({ port: 80 }); // "http://127.0.0.1:<hostPort>"
