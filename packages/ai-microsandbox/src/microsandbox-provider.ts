@@ -29,10 +29,9 @@ const pendingHostPorts = new Set<number>();
  * - `{ sandbox }` — wrap an already-created `microsandbox` `Sandbox`. The
  *   caller owns its lifecycle; the provider's `stop()` and `destroy()` are
  *   no-ops.
- * - `{ image?, namePrefix?, configure? }` — provider creates a fresh sandbox
- *   per session. microsandbox's builder is fluent-only (no plain options
- *   object covers its ~50 setters), so `configure` is the escape hatch for
- *   anything beyond `image`.
+ * - `{ image?, namePrefix?, configure?, setup? }` — provider creates a fresh sandbox
+ *   per session. `setup` runs against each new VM before the harness's
+ *   `onFirstCreate` bootstrap; `configure` customizes the fluent builder.
  */
 export type MicrosandboxSettings =
 	| { sandbox: Sandbox }
@@ -41,6 +40,10 @@ export type MicrosandboxSettings =
 			image?: string;
 			namePrefix?: string;
 			configure?: (builder: SandboxBuilder) => SandboxBuilder;
+			setup?: (
+				session: SandboxSession,
+				opts: { abortSignal?: AbortSignal },
+			) => Promise<void>;
 	  };
 
 type CreateNewSettings = Extract<MicrosandboxSettings, { sandbox?: never }>;
@@ -103,12 +106,13 @@ export class MicrosandboxProvider implements HarnessV1SandboxProvider {
 		// microsandbox has no snapshot-based one-time-setup hook that would let
 		// `onFirstCreate`'s side effects be baked into a reusable template:
 		// snapshots require stop -> snapshot -> reboot and are local-backend-only,
-		// and `identity` has no persistence story on this provider. When supplied,
-		// `onFirstCreate` simply runs against every freshly created sandbox.
-		if (options?.onFirstCreate != null) {
-			await options.onFirstCreate(new MicrosandboxSession(sandbox), {
-				abortSignal: options.abortSignal,
-			});
+		// and `identity` has no persistence story on this provider. Setup and
+		// `onFirstCreate` therefore run against every freshly created sandbox.
+		if (settings.setup != null || options?.onFirstCreate != null) {
+			const session = new MicrosandboxSession(sandbox);
+			const opts = { abortSignal: options?.abortSignal };
+			await settings.setup?.(session, opts);
+			await options?.onFirstCreate?.(session, opts);
 		}
 
 		return MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: true });

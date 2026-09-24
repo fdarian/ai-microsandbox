@@ -194,6 +194,57 @@ describe('MicrosandboxProvider', () => {
 
 			expect(onFirstCreate).toHaveBeenCalledTimes(1);
 		});
+
+		it('runs setup once before onFirstCreate with the same session and abort signal', async () => {
+			const sandbox = makeFakeSandbox('ai-sdk-harness-session-setup');
+			const { builder } = makeFakeBuilder(sandbox);
+			mockSandboxStatics({ builder: mock(() => builder) });
+			const { createMicrosandbox } = await importProvider();
+			const calls: string[] = [];
+			const abortSignal = new AbortController().signal;
+			let setupSession: unknown;
+			const setup = mock(
+				async (session: unknown, opts: { abortSignal?: AbortSignal }) => {
+					setupSession = session;
+					calls.push('setup');
+					expect(opts.abortSignal).toBe(abortSignal);
+				},
+			);
+			const onFirstCreate = mock(
+				async (session: unknown, opts: { abortSignal?: AbortSignal }) => {
+					calls.push('onFirstCreate');
+					expect(session).toBe(setupSession);
+					expect(opts.abortSignal).toBe(abortSignal);
+				},
+			);
+			const provider = createMicrosandbox({ setup });
+			await provider.createSession({
+				sessionId: 'setup',
+				abortSignal,
+				onFirstCreate,
+			});
+
+			expect(calls).toEqual(['setup', 'onFirstCreate']);
+			expect(setup).toHaveBeenCalledTimes(1);
+		});
+
+		it('does not invoke onFirstCreate when setup fails', async () => {
+			const sandbox = makeFakeSandbox('ai-sdk-harness-session-setup-error');
+			const { builder } = makeFakeBuilder(sandbox);
+			mockSandboxStatics({ builder: mock(() => builder) });
+			const { createMicrosandbox } = await importProvider();
+			const onFirstCreate = mock(async () => {});
+			const provider = createMicrosandbox({
+				setup: async () => {
+					throw new Error('setup failed');
+				},
+			});
+
+			await expect(provider.createSession({ onFirstCreate })).rejects.toThrow(
+				'setup failed',
+			);
+			expect(onFirstCreate).not.toHaveBeenCalled();
+		});
 	});
 
 	describe('resumeSession', () => {

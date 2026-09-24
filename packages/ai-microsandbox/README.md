@@ -79,6 +79,18 @@ const provider = createMicrosandbox({
 });
 ```
 
+Use `setup` for guest initialization needed before the harness bootstrap (for example, enabling a package manager). It runs once for each newly created VM, before the caller's `onFirstCreate`, with a plain sandbox session and the caller's abort signal. It does not run when wrapping or resuming an existing sandbox:
+
+```ts
+const provider = createMicrosandbox({
+  image: 'node:22',
+  setup: async (session, opts) => {
+    const result = await session.run({ command: 'corepack enable', abortSignal: opts.abortSignal });
+    if (result.exitCode !== 0) throw new Error(result.stderr);
+  },
+});
+```
+
 ## Ports
 
 Each newly created session publishes guest TCP port **8765** to a free local host port before `configure` runs. The Claude Code, Codex, and OpenCode bridge adapters use the first exposed port by default, so they can connect without caller-side port setup. Concurrent session creations receive different host ports. An adapter configured with an explicit `port` other than 8765 needs that guest port published separately via `configure`. Wrapping an existing sandbox or resuming one uses its existing port map.
