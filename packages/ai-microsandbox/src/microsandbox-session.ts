@@ -327,10 +327,11 @@ function createSandboxProcess(
 			}
 			controllers.stdout?.close();
 			controllers.stderr?.close();
+			return { success: true as const };
 		} catch (error) {
 			controllers.stdout?.error(error);
 			controllers.stderr?.error(error);
-			throw error;
+			return { success: false as const, error };
 		} finally {
 			abortSignal?.removeEventListener('abort', onAbort);
 		}
@@ -343,7 +344,8 @@ function createSandboxProcess(
 		stdout,
 		stderr,
 		async wait(): Promise<{ exitCode: number }> {
-			await drained;
+			const result = await drained;
+			if (!result.success) throw result.error;
 			if (abortSignal?.aborted) {
 				throw abortSignal.reason ?? new DOMException('Aborted', 'AbortError');
 			}
