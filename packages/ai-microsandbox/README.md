@@ -10,7 +10,9 @@ _This package is **experimental**._
 npm i ai-microsandbox microsandbox @ai-sdk/harness
 ```
 
-microsandbox boots a real microVM **on the machine running your Node process** — it is not a hosted API you call over HTTPS. That machine needs hardware virtualization: KVM on Linux, Apple Silicon on macOS, or Windows Hypervisor Platform on Windows. Most CI runners, serverless functions, and containers-within-containers don't have one; run this where you control the host, or point it at [microsandbox's hosted backend](#backend) instead.
+microsandbox boots a real microVM **on the machine running your Node process** — it is not a hosted API you call over HTTPS. That machine needs hardware virtualization: KVM on Linux, Apple Silicon on macOS, or Windows Hypervisor Platform on Windows. Most CI runners, serverless functions, and containers-within-containers don't have one. **The microsandbox cloud backend is not supported for harnesses** because it does not expose published bridge ports.
+
+**Credentials:** Environment variables and API credentials supplied to harness agents are forwarded into the VM. This adapter does not broker credentials or implement `addRequestTransformations`; only run trusted guest code with credentials you intend to expose there.
 
 ## Usage
 
@@ -70,12 +72,12 @@ const provider = createMicrosandbox({
 });
 ```
 
-Some images declare no `WORKDIR` (a bare rootfs, or an OCI image without one) — microsandbox then has no default working directory at all, and `createSession()`/`resumeSession()` throw rather than guessing one. Set it explicitly:
+`image` is required. Use `workDir` to override the image's `WORKDIR`; if neither is set, the adapter creates `/workspace` and uses it as the session working directory. The quick-start with `alpine` therefore works without an image `WORKDIR`. You can also use the fluent builder directly:
 
 ```ts
 const provider = createMicrosandbox({
-  image: 'scratch',
-  configure: builder => builder.workdir('/'),
+  image: 'alpine',
+  workDir: '/workspace',
 });
 ```
 
@@ -85,7 +87,7 @@ Use `setup` for guest initialization needed before the harness bootstrap (for ex
 const provider = createMicrosandbox({
   image: 'node:22',
   setup: async (session, opts) => {
-    const result = await session.run({ command: 'corepack enable', abortSignal: opts.abortSignal });
+    const result = await session.run({ command: 'corepack enable --install-directory ~/.local/bin', abortSignal: opts.abortSignal });
     if (result.exitCode !== 0) throw new Error(result.stderr);
   },
 });
@@ -93,7 +95,9 @@ const provider = createMicrosandbox({
 
 ## Ports
 
-Each newly created session publishes guest TCP port **8765** to a free local host port before `configure` runs. The Claude Code, Codex, and OpenCode bridge adapters use the first exposed port by default, so they can connect without caller-side port setup. Concurrent session creations receive different host ports. An adapter configured with an explicit `port` other than 8765 needs that guest port published separately via `configure`. Wrapping an existing sandbox or resuming one uses its existing port map.
+Each newly created session publishes guest TCP port **8765** (or `bridgePort`) to an auto-picked local host port (or the explicit `hostPort`) before `configure` runs. The Claude Code, Codex, and OpenCode bridge adapters use the first exposed port by default. An adapter configured with an explicit `port` must use the same `bridgePort`. Wrapping or resuming a sandbox uses its existing port map.
+
+An auto-picked host port can rarely be taken by another process before microsandbox binds it; that surfaces as a bridge connection failure.
 
 Port publishing is fixed at sandbox creation time (via `configure`'s `.port(hostPort, guestPort)` for additional ports); this adapter has no way to change it mid-session (`setPorts` is unimplemented).
 
@@ -103,19 +107,20 @@ Port publishing is fixed at sandbox creation time (via `configure`'s `.port(host
 const url = await networkSession.getPortUrl({ port: 80 }); // "http://127.0.0.1:<hostPort>"
 ```
 
-Requesting a port that wasn't published — including a port only published over UDP — throws `HarnessCapabilityUnsupportedError`. **This always throws on the cloud backend**: its wire type carries no ports field at all, so published ports are structurally local-only regardless of what `configure` set.
+Only TCP ports appear in `ports`. Requesting a port that wasn't published — including a UDP-only port — throws `HarnessCapabilityUnsupportedError`. Wildcard binds (`0.0.0.0` / `::`) resolve to loopback URLs; IPv6 addresses are bracketed. URLs default to `http` (or the requested `ws`/`https`); requesting `https` changes the URL scheme only and does **not** configure TLS in the guest. **Cloud has no published ports**, so bridge endpoints cannot be resolved there.
 
 ## Backend
 
-microsandbox runs sandboxes locally by default. Point it at microsandbox's hosted infrastructure instead with `setDefaultBackend` from the `microsandbox` package before creating a session — this adapter drives the same `Sandbox` API either way:
+microsandbox runs sandboxes locally by default. Its cloud backend is **not supported for harnesses**: the cloud wire format does not report published ports, so a bridge cannot connect. Use the local backend on a virtualization-capable host.
 
-```ts
-import { setDefaultBackend } from 'microsandbox';
+Cloud authentication failures are mapped to `HarnessSandboxAuthenticationError`, but this does not make cloud harness sessions functional.
 
-setDefaultBackend({ kind: 'cloud', apiKey: process.env.MSB_API_KEY! });
-```
+## Guest recipes
 
-A cloud-backend failure that looks like a 401/403 is wrapped in `HarnessSandboxAuthenticationError` from `@ai-sdk/harness`, with the underlying microsandbox error preserved as `cause`.
+- **Claude Code:** run the agent as a non-root user; Claude Code refuses root. Create the user and make the work directory writable during `setup` or in the image.
+- **pnpm:** in a Node image, run `corepack enable --install-directory ~/.local/bin` during `setup` and ensure `~/.local/bin` is on the guest `PATH`.
+- **OpenCode:** allocate at least 2 GiB of guest memory with `configure: builder => builder.memory(MiB(2048))` (import `MiB` from `microsandbox`).
+- **Bun-compiled binaries:** microsandbox's native loader may need `NAPI_RS_NATIVE_LIBRARY_PATH` pointing to its `.node` addon, while `setRuntimeMsbPath` from `microsandbox/native` controls the separate `msb` executable. This packaging path issue should be fixed upstream in microsandbox; the two settings are not interchangeable.
 
 ## Not implemented
 
