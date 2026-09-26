@@ -117,7 +117,16 @@ Cloud authentication failures are mapped to `HarnessSandboxAuthenticationError`,
 
 ## Guest recipes
 
-- **Claude Code:** run the agent as a non-root user; Claude Code refuses root. Create the user and make the work directory writable during `setup` or in the image.
+- **Claude Code:** run the agent as a non-root user; Claude Code refuses root. For example, build an image with a writable work directory and switch to the `node` user before starting the sandbox:
+
+  ```dockerfile
+  FROM node:22-alpine
+  RUN mkdir -p /workspace && chown node:node /workspace
+  USER node
+  WORKDIR /workspace
+  ```
+
+  Pass the built image as `image`; these are guest-image choices, not adapter defaults.
 - **pnpm:** in a Node image, run `corepack enable --install-directory ~/.local/bin` during `setup` and ensure `~/.local/bin` is on the guest `PATH`.
 - **OpenCode:** allocate at least 2 GiB of guest memory with `configure: builder => builder.memory(MiB(2048))` (import `MiB` from `microsandbox`).
 - **Bun-compiled binaries:** microsandbox's native loader may need `NAPI_RS_NATIVE_LIBRARY_PATH` pointing to its `.node` addon, while `setRuntimeMsbPath` from `microsandbox/native` controls the separate `msb` executable. This packaging path issue should be fixed upstream in microsandbox; the two settings are not interchangeable.
