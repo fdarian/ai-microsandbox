@@ -129,7 +129,9 @@ export class MicrosandboxSession implements SandboxSession {
 	}): Promise<ReadableStream<Uint8Array> | null> {
 		abortSignal?.throwIfAborted();
 		try {
-			const fsStream = await this.sandbox.fs().readStream(path);
+			const fsStream = await this.sandbox
+				.fs()
+				.readStream(this.resolvePath(path));
 			return asyncIterableToReadableStream(fsStream);
 		} catch (error) {
 			if (isFileNotFoundError(error)) return null;
@@ -146,7 +148,7 @@ export class MicrosandboxSession implements SandboxSession {
 	}): Promise<Uint8Array | null> {
 		abortSignal?.throwIfAborted();
 		try {
-			return await this.sandbox.fs().read(path);
+			return await this.sandbox.fs().read(this.resolvePath(path));
 		} catch (error) {
 			if (isFileNotFoundError(error)) return null;
 			throw error;
@@ -182,8 +184,9 @@ export class MicrosandboxSession implements SandboxSession {
 		abortSignal?: AbortSignal;
 	}): Promise<void> {
 		abortSignal?.throwIfAborted();
-		await this.ensureParentDirectory(path);
-		const sink = await this.sandbox.fs().writeStream(path);
+		const resolvedPath = this.resolvePath(path);
+		await this.ensureParentDirectory(resolvedPath);
+		const sink = await this.sandbox.fs().writeStream(resolvedPath);
 		await pumpReadableStreamToSink(content, sink, abortSignal);
 	}
 
@@ -197,8 +200,9 @@ export class MicrosandboxSession implements SandboxSession {
 		abortSignal?: AbortSignal;
 	}): Promise<void> {
 		abortSignal?.throwIfAborted();
-		await this.ensureParentDirectory(path);
-		await this.sandbox.fs().write(path, content);
+		const resolvedPath = this.resolvePath(path);
+		await this.ensureParentDirectory(resolvedPath);
+		await this.sandbox.fs().write(resolvedPath, content);
 	}
 
 	async writeTextFile({
@@ -243,6 +247,10 @@ export class MicrosandboxSession implements SandboxSession {
 				`Failed to create parent directory "${parent}" for "${path}" (mkdir -p exited ${result.code}): ${result.stderr()}`,
 			);
 		}
+	}
+
+	private resolvePath(path: string): string {
+		return this.workDir == null ? path : posix.resolve(this.workDir, path);
 	}
 }
 

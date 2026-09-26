@@ -76,7 +76,7 @@ describe('real microsandbox VM', () => {
 		try {
 			const file = await session
 				.restricted()
-				.readTextFile({ path: '/workspace/setup.txt' });
+				.readTextFile({ path: 'setup.txt' });
 			expect(file).toBe('ready');
 			const result = await session
 				.restricted()

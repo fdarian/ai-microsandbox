@@ -387,6 +387,17 @@ describe('MicrosandboxSession', () => {
 	});
 
 	describe('file I/O', () => {
+		it('resolves relative file paths against the session workdir', async () => {
+			const { sandbox, spies } = makeMockSandbox();
+			const session = new MicrosandboxSession(sandbox, '/workspace');
+			await session.writeTextFile({ path: 'sub/file.txt', content: 'hi' });
+			expect(spies.fs.write).toHaveBeenCalledWith(
+				'/workspace/sub/file.txt',
+				expect.any(Uint8Array),
+			);
+			await session.readTextFile({ path: 'sub/file.txt' });
+			expect(spies.fs.read).toHaveBeenCalledWith('/workspace/sub/file.txt');
+		});
 		it('readBinaryFile returns bytes from fs().read()', async () => {
 			const { sandbox, spies } = makeMockSandbox();
 			spies.fs.read.mockResolvedValueOnce(new Uint8Array([1, 2, 3]));
