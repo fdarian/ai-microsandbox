@@ -42,9 +42,8 @@ type MicrosandboxRuntimeConfig = {
  * provider's `createSession()`/`resumeSession()` return one of these. It
  * extends {@link MicrosandboxSession} with the infra surface (ports,
  * lifecycle). It owns the sandbox's lifecycle only when the provider created
- * it; when the provider was given an existing sandbox (or merely connected to
- * one via `resumeSession`), `stop()` and `destroy()` are no-ops (the caller,
- * or the original creator, retains ownership).
+ * it; when the provider was given an existing sandbox, `stop()` and
+ * `destroy()` are no-ops (the caller retains ownership).
  */
 export class MicrosandboxNetworkSession
 	extends MicrosandboxSession
@@ -54,6 +53,8 @@ export class MicrosandboxNetworkSession
 	readonly defaultWorkingDirectory: string;
 	readonly ports: ReadonlyArray<number>;
 	private readonly ownsLifecycle: boolean;
+	private stopped = false;
+	private destroyed = false;
 	private readonly tcpPortByGuestPort: ReadonlyMap<
 		number,
 		{ hostPort: number; hostBind: string }
@@ -63,17 +64,14 @@ export class MicrosandboxNetworkSession
 		sandbox: Sandbox;
 		ownsLifecycle: boolean;
 		config: MicrosandboxRuntimeConfig;
+		workDir?: string;
 	}) {
-		super(input.sandbox);
+		const workdir =
+			input.workDir ?? input.config.runtime?.workdir ?? '/workspace';
+		super(input.sandbox, workdir);
 		this.ownsLifecycle = input.ownsLifecycle;
 		this.id = input.sandbox.name;
 
-		const workdir = input.config.runtime?.workdir;
-		if (workdir == null) {
-			throw new Error(
-				`microsandbox sandbox "${input.sandbox.name}" has no working directory configured — its image declares no WORKDIR (or a bare rootfs was used). Set one explicitly via configure: builder => builder.workdir('/some/path') when creating the sandbox; the harness sandbox contract requires a concrete defaultWorkingDirectory.`,
-			);
-		}
 		this.defaultWorkingDirectory = workdir;
 
 		const publishedPorts = input.config.network?.ports;
@@ -87,10 +85,14 @@ export class MicrosandboxNetworkSession
 				`microsandbox sandbox "${input.sandbox.name}" did not report a "network.ports" array from Sandbox.config() (got ${JSON.stringify(publishedPorts)}). This is required to resolve the harness sandbox contract's \`ports\`/\`getPortEndpoint\`.`,
 			);
 		}
-		this.ports = [...new Set(publishedPorts.map((port) => port.guestPort))];
-		// Endpoints only resolve TCP forwards; a UDP-only guest port is not a
-		// URL-addressable resource, so it's excluded from this map (but still
-		// shows up in `ports`, which just reflects what's published).
+		this.ports = [
+			...new Set(
+				publishedPorts
+					.filter((port) => port.protocol === 'tcp')
+					.map((port) => port.guestPort),
+			),
+		];
+		// Endpoints only resolve TCP forwards.
 		this.tcpPortByGuestPort = new Map(
 			publishedPorts
 				.filter((port) => port.protocol === 'tcp')
@@ -110,8 +112,20 @@ export class MicrosandboxNetworkSession
 	static async create(input: {
 		sandbox: Sandbox;
 		ownsLifecycle: boolean;
+		workDir?: string;
 	}): Promise<MicrosandboxNetworkSession> {
 		const config = (await input.sandbox.config()) as MicrosandboxRuntimeConfig;
+		if (
+			input.ownsLifecycle &&
+			(input.workDir != null || config.runtime?.workdir == null)
+		) {
+			const workdir = input.workDir ?? '/workspace';
+			const result = await input.sandbox.exec('mkdir', ['-p', workdir]);
+			if (!result.success)
+				throw new Error(
+					`Failed to create working directory "${workdir}": ${result.stderr()}`,
+				);
+		}
 		return new MicrosandboxNetworkSession({ ...input, config });
 	}
 
@@ -133,7 +147,7 @@ export class MicrosandboxNetworkSession
 	}
 
 	restricted(): SandboxSession {
-		return new MicrosandboxSession(this.sandbox);
+		return new MicrosandboxSession(this.sandbox, this.defaultWorkingDirectory);
 	}
 
 	/**
@@ -164,7 +178,15 @@ export class MicrosandboxNetworkSession
 			});
 		}
 		const protocol = options.protocol ?? 'http';
-		return { url: `${protocol}://${mapped.hostBind}:${mapped.hostPort}` };
+		const host =
+			mapped.hostBind === '0.0.0.0'
+				? '127.0.0.1'
+				: mapped.hostBind === '::'
+					? '::1'
+					: mapped.hostBind;
+		return {
+			url: `${protocol}://${host.includes(':') ? `[${host}]` : host}:${mapped.hostPort}`,
+		};
 	};
 
 	getPortUrl = async (options: {
@@ -173,14 +195,16 @@ export class MicrosandboxNetworkSession
 	}): Promise<string> => (await this.getPortEndpoint(options)).url;
 
 	stop = async (): Promise<void> => {
-		if (!this.ownsLifecycle) return;
+		if (!this.ownsLifecycle || this.stopped || this.destroyed) return;
 		await this.sandbox.stop();
+		this.stopped = true;
 	};
 
 	destroy = async (): Promise<void> => {
-		if (!this.ownsLifecycle) return;
-		await this.sandbox.stop().catch(() => {});
+		if (!this.ownsLifecycle || this.destroyed) return;
+		await this.stop();
 		await Sandbox.remove(this.sandbox.name);
+		this.destroyed = true;
 	};
 }
 

@@ -13,14 +13,13 @@ import {
 	type SandboxBuilder,
 } from 'microsandbox';
 import { MicrosandboxNetworkSession } from './microsandbox-network-session';
-import { MicrosandboxSession } from './microsandbox-session';
 
 const PROVIDER_ID = 'microsandbox';
 const SESSION_NAME_PREFIX = 'ai-sdk-harness-session-';
 const DEFAULT_NAME_PREFIX = 'ai-sdk-harness';
 /** microsandbox caps sandbox names at 128 UTF-8 bytes (see `Sandbox.builder`'s doc comment). */
 const MAX_NAME_BYTES = 128;
-const BRIDGE_GUEST_PORT = 8765;
+const DEFAULT_BRIDGE_PORT = 8765;
 const pendingHostPorts = new Set<number>();
 
 /**
@@ -29,7 +28,7 @@ const pendingHostPorts = new Set<number>();
  * - `{ sandbox }` — wrap an already-created `microsandbox` `Sandbox`. The
  *   caller owns its lifecycle; the provider's `stop()` and `destroy()` are
  *   no-ops.
- * - `{ image?, namePrefix?, configure?, setup? }` — provider creates a fresh sandbox
+ * - `{ image, namePrefix?, configure?, setup? }` — provider creates a fresh sandbox
  *   per session. `setup` runs against each new VM before the harness's
  *   `onFirstCreate` bootstrap; `configure` customizes the fluent builder.
  */
@@ -37,7 +36,10 @@ export type MicrosandboxSettings =
 	| { sandbox: Sandbox }
 	| {
 			sandbox?: never;
-			image?: string;
+			image: string;
+			workDir?: string;
+			bridgePort?: number;
+			hostPort?: number;
 			namePrefix?: string;
 			configure?: (builder: SandboxBuilder) => SandboxBuilder;
 			setup?: (
@@ -49,7 +51,7 @@ export type MicrosandboxSettings =
 type CreateNewSettings = Extract<MicrosandboxSettings, { sandbox?: never }>;
 
 export function createMicrosandbox(
-	settings: MicrosandboxSettings = {} as MicrosandboxSettings,
+	settings: MicrosandboxSettings,
 ): MicrosandboxProvider {
 	return new MicrosandboxProvider(settings);
 }
@@ -89,17 +91,19 @@ export class MicrosandboxProvider implements HarnessV1SandboxProvider {
 			? sessionSandboxName(options.sessionId)
 			: randomSandboxName(settings.namePrefix);
 
-		const hostPort = await allocateHostPort();
+		const hostPort = settings.hostPort ?? (await allocateHostPort());
 		const sandbox = await (async () => {
 			try {
 				return await withAuthenticationError(async () => {
-					let builder = Sandbox.builder(name).port(hostPort, BRIDGE_GUEST_PORT);
-					if (settings.image != null) builder = builder.image(settings.image);
+					// microsandbox logs bind failures in a background listener rather than rejecting create(); retry is impossible: https://github.com/microsandbox/microsandbox/blob/v0.6.18/crates/network/lib/ports/publisher.rs#L405-L441
+					let builder = Sandbox.builder(name)
+						.image(settings.image)
+						.port(hostPort, settings.bridgePort ?? DEFAULT_BRIDGE_PORT);
 					if (settings.configure != null) builder = settings.configure(builder);
 					return builder.create();
 				});
 			} finally {
-				pendingHostPorts.delete(hostPort);
+				if (settings.hostPort == null) pendingHostPorts.delete(hostPort);
 			}
 		})();
 
@@ -108,14 +112,34 @@ export class MicrosandboxProvider implements HarnessV1SandboxProvider {
 		// snapshots require stop -> snapshot -> reboot and are local-backend-only,
 		// and `identity` has no persistence story on this provider. Setup and
 		// `onFirstCreate` therefore run against every freshly created sandbox.
-		if (settings.setup != null || options?.onFirstCreate != null) {
-			const session = new MicrosandboxSession(sandbox);
+		try {
+			options?.abortSignal?.throwIfAborted();
+			const networkSession = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+				workDir: settings.workDir,
+			});
+			options?.abortSignal?.throwIfAborted();
+			const session = networkSession.restricted();
 			const opts = { abortSignal: options?.abortSignal };
 			await settings.setup?.(session, opts);
+			options?.abortSignal?.throwIfAborted();
 			await options?.onFirstCreate?.(session, opts);
+			options?.abortSignal?.throwIfAborted();
+			return networkSession;
+		} catch (error) {
+			try {
+				await sandbox.stop();
+			} catch {
+				// Removal may still succeed if the VM already stopped.
+			}
+			try {
+				await Sandbox.remove(sandbox.name);
+			} catch {
+				// Preserve the original creation failure.
+			}
+			throw error;
 		}
-
-		return MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: true });
 	};
 
 	resumeSession = async (options: {
@@ -133,10 +157,10 @@ export class MicrosandboxProvider implements HarnessV1SandboxProvider {
 
 		const name = sessionSandboxName(options.sessionId);
 		const handle = await withAuthenticationError(() => Sandbox.get(name));
-		// `connect()` deliberately does not take lifecycle ownership — the
-		// process that originally created the sandbox remains its owner.
-		const sandbox = await withAuthenticationError(() => handle.connect());
-		return MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: false });
+		const sandbox = await withAuthenticationError(() =>
+			handle.connectOrStart(),
+		);
+		return MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: true });
 	};
 }
 

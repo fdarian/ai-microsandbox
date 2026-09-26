@@ -111,6 +111,50 @@ describe('MicrosandboxSession', () => {
 	});
 
 	describe('spawn', () => {
+		it('propagates the original event-stream failure from wait()', async () => {
+			const { sandbox, spies } = makeMockSandbox();
+			const failure = new Error('transport disconnected');
+			const handle = {
+				async *[Symbol.asyncIterator](): AsyncGenerator<ExecEvent> {
+					yield { kind: 'started', pid: 1 };
+					throw failure;
+				},
+				kill: mock(async () => {}),
+			};
+			spies.execStreamWith.mockResolvedValueOnce(
+				handle as unknown as ExecHandle,
+			);
+			const process = await new MicrosandboxSession(sandbox).spawn({
+				command: 'echo hi',
+			});
+			await expect(process.wait()).rejects.toBe(failure);
+		});
+
+		it('pauses event consumption when stdout is unread', async () => {
+			const { sandbox, spies } = makeMockSandbox();
+			let nextEvents = 0;
+			const handle = {
+				async *[Symbol.asyncIterator](): AsyncGenerator<ExecEvent> {
+					for (let i = 0; i < 10; i++) {
+						nextEvents++;
+						yield { kind: 'stdout', data: new Uint8Array([i]) };
+					}
+					yield { kind: 'exited', code: 0 };
+				},
+				kill: mock(async () => {}),
+			};
+			spies.execStreamWith.mockResolvedValueOnce(
+				handle as unknown as ExecHandle,
+			);
+			const process = await new MicrosandboxSession(sandbox).spawn({
+				command: 'echo hi',
+			});
+			await Bun.sleep(10);
+			expect(nextEvents).toBeLessThan(10);
+			const reader = process.stdout.getReader();
+			for (let i = 0; i < 10; i++) await reader.read();
+			await process.wait();
+		});
 		it('runs the command as `sh -c <command>` and demuxes stdout/stderr/exit', async () => {
 			const { sandbox, spies } = makeMockSandbox();
 			const { handle } = makeExecHandle([

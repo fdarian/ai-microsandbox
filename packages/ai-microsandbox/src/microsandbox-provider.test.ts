@@ -10,7 +10,7 @@ function makeFakeSandbox(name: string) {
 			network: { ports: [] },
 		})),
 		stop: mock(async () => {}),
-		exec: mock(async () => ({})),
+		exec: mock(async () => ({ success: true })),
 		fs: mock(() => ({})),
 	} as unknown as SandboxType;
 }
@@ -22,8 +22,14 @@ function makeFakeBuilder(sandbox: SandboxType) {
 	const image = mock(function (this: unknown) {
 		return this;
 	});
+	const workdir = mock(function (this: unknown) {
+		return this;
+	});
 	const create = mock(async () => sandbox);
-	return { builder: { port, image, create }, spies: { port, image, create } };
+	return {
+		builder: { port, image, workdir, create },
+		spies: { port, image, workdir, create },
+	};
 }
 
 /** Re-mocks the `microsandbox` module's `Sandbox` static, keeping every other
@@ -104,6 +110,9 @@ describe('MicrosandboxProvider', () => {
 			const sandbox = makeFakeSandbox('concurrent');
 			const ports: number[] = [];
 			const builderSpy = mock(() => ({
+				image: mock(function (this: unknown) {
+					return this;
+				}),
 				port: mock(function (this: unknown, host: number, guest: number) {
 					expect(guest).toBe(8765);
 					ports.push(host);
@@ -116,7 +125,7 @@ describe('MicrosandboxProvider', () => {
 			}));
 			mockSandboxStatics({ builder: builderSpy });
 			const { createMicrosandbox } = await importProvider();
-			const provider = createMicrosandbox({});
+			const provider = createMicrosandbox({ image: 'alpine' });
 			await Promise.all([provider.createSession(), provider.createSession()]);
 			expect(ports).toHaveLength(2);
 			expect(new Set(ports).size).toBe(2);
@@ -141,7 +150,9 @@ describe('MicrosandboxProvider', () => {
 			}));
 			mockSandboxStatics({ builder: mock(() => builder.builder) });
 			const { createMicrosandbox } = await importProvider();
-			const session = await createMicrosandbox({}).createSession();
+			const session = await createMicrosandbox({
+				image: 'alpine',
+			}).createSession();
 			expect(session.ports[0]).toBe(8765);
 			expect(
 				await session.getPortEndpoint({
@@ -160,7 +171,10 @@ describe('MicrosandboxProvider', () => {
 			mockSandboxStatics({ builder: builderSpy });
 			const { createMicrosandbox } = await importProvider();
 
-			const provider = createMicrosandbox({ namePrefix: 'my-prefix' });
+			const provider = createMicrosandbox({
+				image: 'alpine',
+				namePrefix: 'my-prefix',
+			});
 			await provider.createSession();
 
 			const [name] = builderSpy.mock.calls[0] as [string];
@@ -170,7 +184,7 @@ describe('MicrosandboxProvider', () => {
 		it('rejects a sessionId that would exceed the 128-byte sandbox name limit', async () => {
 			mockSandboxStatics({});
 			const { createMicrosandbox } = await importProvider();
-			const provider = createMicrosandbox({});
+			const provider = createMicrosandbox({ image: 'alpine' });
 			await expect(
 				provider.createSession({ sessionId: 'x'.repeat(200) }),
 			).rejects.toThrow(/128-byte limit/);
@@ -189,7 +203,7 @@ describe('MicrosandboxProvider', () => {
 			const onFirstCreate = mock(async (session: unknown) => {
 				expect(session).not.toBeInstanceOf(MicrosandboxNetworkSession);
 			});
-			const provider = createMicrosandbox({});
+			const provider = createMicrosandbox({ image: 'alpine' });
 			await provider.createSession({ sessionId: 'first', onFirstCreate });
 
 			expect(onFirstCreate).toHaveBeenCalledTimes(1);
@@ -217,7 +231,7 @@ describe('MicrosandboxProvider', () => {
 					expect(opts.abortSignal).toBe(abortSignal);
 				},
 			);
-			const provider = createMicrosandbox({ setup });
+			const provider = createMicrosandbox({ image: 'alpine', setup });
 			await provider.createSession({
 				sessionId: 'setup',
 				abortSignal,
@@ -231,10 +245,12 @@ describe('MicrosandboxProvider', () => {
 		it('does not invoke onFirstCreate when setup fails', async () => {
 			const sandbox = makeFakeSandbox('ai-sdk-harness-session-setup-error');
 			const { builder } = makeFakeBuilder(sandbox);
-			mockSandboxStatics({ builder: mock(() => builder) });
+			const remove = mock(async () => {});
+			mockSandboxStatics({ builder: mock(() => builder), remove });
 			const { createMicrosandbox } = await importProvider();
 			const onFirstCreate = mock(async () => {});
 			const provider = createMicrosandbox({
+				image: 'alpine',
 				setup: async () => {
 					throw new Error('setup failed');
 				},
@@ -244,6 +260,44 @@ describe('MicrosandboxProvider', () => {
 				'setup failed',
 			);
 			expect(onFirstCreate).not.toHaveBeenCalled();
+			expect(sandbox.stop).toHaveBeenCalledTimes(1);
+			expect(remove).toHaveBeenCalledWith(sandbox.name);
+		});
+
+		it('preserves a bootstrap error when cleanup fails', async () => {
+			const sandbox = makeFakeSandbox('bootstrap-failure');
+			(sandbox.stop as ReturnType<typeof mock>).mockRejectedValueOnce(
+				new Error('stop failed'),
+			);
+			const remove = mock(async () => {
+				throw new Error('remove failed');
+			});
+			const { builder } = makeFakeBuilder(sandbox);
+			mockSandboxStatics({ builder: mock(() => builder), remove });
+			const { createMicrosandbox } = await importProvider();
+			await expect(
+				createMicrosandbox({ image: 'alpine' }).createSession({
+					onFirstCreate: async () => {
+						throw new Error('bootstrap failed');
+					},
+				}),
+			).rejects.toThrow('bootstrap failed');
+			expect(remove).toHaveBeenCalledWith(sandbox.name);
+		});
+
+		it('uses an explicit host port and configurable bridge guest port', async () => {
+			const sandbox = makeFakeSandbox('explicit-port');
+			const { builder, spies } = makeFakeBuilder(sandbox);
+			mockSandboxStatics({ builder: mock(() => builder) });
+			const { createMicrosandbox } = await importProvider();
+			await createMicrosandbox({
+				image: 'alpine',
+				hostPort: 43210,
+				bridgePort: 9000,
+				workDir: '/work',
+			}).createSession();
+			expect(spies.port).toHaveBeenCalledWith(43210, 9000);
+			expect(sandbox.exec).toHaveBeenCalledWith('mkdir', ['-p', '/work']);
 		});
 	});
 
@@ -265,23 +319,23 @@ describe('MicrosandboxProvider', () => {
 			expect(getSpy).not.toHaveBeenCalled();
 		});
 
-		it('looks up by deterministic name then connects without taking ownership', async () => {
+		it('looks up by deterministic name, starts or connects, and owns the VM', async () => {
 			const sandbox = makeFakeSandbox('ai-sdk-harness-session-resumed');
-			const connect = mock(async () => sandbox);
-			const getSpy = mock(async (_name: string) => ({ connect }));
+			const connectOrStart = mock(async () => sandbox);
+			const getSpy = mock(async (_name: string) => ({ connectOrStart }));
 			mockSandboxStatics({ get: getSpy });
 			const { createMicrosandbox } = await importProvider();
 
-			const provider = createMicrosandbox({});
+			const provider = createMicrosandbox({ image: 'alpine' });
 			const session = await provider.resumeSession({ sessionId: 'resumed' });
 
 			expect(getSpy).toHaveBeenCalledWith('ai-sdk-harness-session-resumed');
-			expect(connect).toHaveBeenCalledTimes(1);
+			expect(connectOrStart).toHaveBeenCalledTimes(1);
 			expect(session.id).toBe('ai-sdk-harness-session-resumed');
 
-			// ownsLifecycle: false per connect()'s contract — stop() must be a no-op.
 			await session.stop();
-			expect(sandbox.stop).not.toHaveBeenCalled();
+			await session.stop();
+			expect(sandbox.stop).toHaveBeenCalledTimes(1);
 		});
 
 		it('wraps an auth-shaped failure from Sandbox.get into HarnessSandboxAuthenticationError', async () => {
@@ -295,7 +349,7 @@ describe('MicrosandboxProvider', () => {
 				'@ai-sdk/harness'
 			);
 
-			const provider = createMicrosandbox({});
+			const provider = createMicrosandbox({ image: 'alpine' });
 			await expect(
 				provider.resumeSession({ sessionId: 'get-auth-fail' }),
 			).rejects.toBeInstanceOf(HarnessSandboxAuthenticationError);
@@ -303,21 +357,21 @@ describe('MicrosandboxProvider', () => {
 
 		it('wraps an auth-shaped failure from handle.connect() into HarnessSandboxAuthenticationError', async () => {
 			const { HttpError } = realMicrosandbox;
-			const connect = mock(async () => {
+			const connectOrStart = mock(async () => {
 				throw new HttpError('request failed: 403 Forbidden');
 			});
-			const getSpy = mock(async (_name: string) => ({ connect }));
+			const getSpy = mock(async (_name: string) => ({ connectOrStart }));
 			mockSandboxStatics({ get: getSpy });
 			const { createMicrosandbox } = await importProvider();
 			const { HarnessSandboxAuthenticationError } = await import(
 				'@ai-sdk/harness'
 			);
 
-			const provider = createMicrosandbox({});
+			const provider = createMicrosandbox({ image: 'alpine' });
 			await expect(
 				provider.resumeSession({ sessionId: 'connect-auth-fail' }),
 			).rejects.toBeInstanceOf(HarnessSandboxAuthenticationError);
-			expect(connect).toHaveBeenCalledTimes(1);
+			expect(connectOrStart).toHaveBeenCalledTimes(1);
 		});
 	});
 
@@ -342,7 +396,7 @@ describe('MicrosandboxProvider', () => {
 				'@ai-sdk/harness'
 			);
 
-			const provider = createMicrosandbox({});
+			const provider = createMicrosandbox({ image: 'alpine' });
 			await expect(
 				provider.createSession({ sessionId: 'auth-fail' }),
 			).rejects.toBeInstanceOf(HarnessSandboxAuthenticationError);
@@ -368,7 +422,7 @@ describe('MicrosandboxProvider', () => {
 				'@ai-sdk/harness'
 			);
 
-			const provider = createMicrosandbox({});
+			const provider = createMicrosandbox({ image: 'alpine' });
 			const failure = provider.createSession({ sessionId: 'other-fail' });
 			await expect(failure).rejects.not.toBeInstanceOf(
 				HarnessSandboxAuthenticationError,

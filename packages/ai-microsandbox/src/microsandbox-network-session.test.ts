@@ -40,7 +40,7 @@ function makeMockSandbox(
 		name: overrides.name ?? 'sbx_net_test',
 		config,
 		stop,
-		exec: mock(async () => ({})),
+		exec: mock(async () => ({ success: true })),
 		fs: mock(() => ({})),
 	};
 	return { sandbox: sandbox as unknown as Sandbox, spies: { config, stop } };
@@ -56,25 +56,30 @@ describe('MicrosandboxNetworkSession', () => {
 			});
 			expect(session.id).toBe('sbx_net_test');
 			expect(session.defaultWorkingDirectory).toBe('/root');
-			expect(session.ports).toEqual([3000, 8080, 5353]);
+			expect(session.ports).toEqual([3000, 8080]);
 		});
 
-		it('throws when config.runtime.workdir is null (image declares no WORKDIR)', async () => {
+		it('creates /workspace when the image declares no WORKDIR', async () => {
 			const { sandbox } = makeMockSandbox({
 				config: { runtime: { workdir: null }, network: { ports: [] } },
 			});
-			await expect(
-				MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: true }),
-			).rejects.toThrow(/working directory/i);
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+			expect(session.defaultWorkingDirectory).toBe('/workspace');
+			expect(sandbox.exec).toHaveBeenCalledWith('mkdir', ['-p', '/workspace']);
 		});
 
-		it('throws when config has no runtime key at all', async () => {
+		it('falls back when config has no runtime key at all', async () => {
 			const { sandbox } = makeMockSandbox({
 				config: { network: { ports: [] } },
 			});
-			await expect(
-				MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: true }),
-			).rejects.toThrow(/working directory/i);
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+			expect(session.defaultWorkingDirectory).toBe('/workspace');
 		});
 	});
 
@@ -135,7 +140,39 @@ describe('MicrosandboxNetworkSession', () => {
 				ownsLifecycle: true,
 			});
 			expect(await session.getPortUrl({ port: 80 })).toBe(
-				'http://0.0.0.0:9000',
+				'http://127.0.0.1:9000',
+			);
+		});
+
+		it('normalizes wildcard IPv6 and brackets IPv6 hosts', async () => {
+			const { sandbox } = makeMockSandbox({
+				config: {
+					runtime: { workdir: '/root' },
+					network: {
+						ports: [
+							{
+								hostPort: 9000,
+								guestPort: 80,
+								protocol: 'tcp',
+								hostBind: '::',
+							},
+							{
+								hostPort: 9001,
+								guestPort: 81,
+								protocol: 'tcp',
+								hostBind: '::2',
+							},
+						],
+					},
+				},
+			});
+			const session = await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+			expect(await session.getPortUrl({ port: 80 })).toBe('http://[::1]:9000');
+			expect(await session.getPortUrl({ port: 81, protocol: 'https' })).toBe(
+				'https://[::2]:9001',
 			);
 		});
 
@@ -221,6 +258,8 @@ describe('MicrosandboxNetworkSession', () => {
 			});
 			await session.stop();
 			expect(spies.stop).toHaveBeenCalledTimes(1);
+			await session.stop();
+			expect(spies.stop).toHaveBeenCalledTimes(1);
 		});
 
 		it('destroy() is a no-op when the session does not own the sandbox lifecycle', async () => {
@@ -249,9 +288,11 @@ describe('MicrosandboxNetworkSession', () => {
 
 			expect(spies.stop).toHaveBeenCalledTimes(1);
 			expect(remove).toHaveBeenCalledWith('sbx_owned');
+			await session.destroy();
+			expect(remove).toHaveBeenCalledTimes(1);
 		});
 
-		it('destroy() still removes the sandbox even when stop() rejects', async () => {
+		it('destroy() propagates a stop failure', async () => {
 			const remove = mock(async (_name: string) => {});
 			mock.module('microsandbox', () => ({
 				...realMicrosandbox,
@@ -276,10 +317,10 @@ describe('MicrosandboxNetworkSession', () => {
 				sandbox,
 				ownsLifecycle: true,
 			});
-			await session.destroy();
+			await expect(session.destroy()).rejects.toThrow('already stopped');
 
 			expect(stop).toHaveBeenCalledTimes(1);
-			expect(remove).toHaveBeenCalledWith('sbx_swallow');
+			expect(remove).not.toHaveBeenCalled();
 		});
 	});
 
@@ -291,7 +332,7 @@ describe('MicrosandboxNetworkSession', () => {
 				ownsLifecycle: true,
 			});
 			expect(session.description).toContain('/root');
-			expect(session.description).toContain('3000, 8080, 5353');
+			expect(session.description).toContain('3000, 8080');
 		});
 	});
 });

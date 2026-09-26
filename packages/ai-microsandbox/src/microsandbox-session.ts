@@ -24,7 +24,10 @@ import {
  * lifetime of the underlying sandbox.
  */
 export class MicrosandboxSession implements SandboxSession {
-	constructor(protected readonly sandbox: Sandbox) {}
+	constructor(
+		protected readonly sandbox: Sandbox,
+		private readonly workDir?: string,
+	) {}
 
 	get description(): string {
 		return [
@@ -98,8 +101,8 @@ export class MicrosandboxSession implements SandboxSession {
 			// does.
 			handle = await this.sandbox.execStreamWith('sh', (builder) => {
 				let configured = builder.arg('-c').arg(command);
-				if (workingDirectory !== undefined)
-					configured = configured.cwd(workingDirectory);
+				const cwd = workingDirectory ?? this.workDir;
+				if (cwd !== undefined) configured = configured.cwd(cwd);
 				if (env !== undefined) configured = configured.envs(env);
 				return configured;
 			});
@@ -264,10 +267,14 @@ function createSandboxProcess(
 		stdout?: ReadableStreamDefaultController<Uint8Array>;
 		stderr?: ReadableStreamDefaultController<Uint8Array>;
 	} = {};
+	const pendingPulls: { stdout?: () => void; stderr?: () => void } = {};
 
 	const stdout = new ReadableStream<Uint8Array>({
 		start(controller) {
 			controllers.stdout = controller;
+		},
+		pull() {
+			pendingPulls.stdout?.();
 		},
 	});
 
@@ -275,7 +282,22 @@ function createSandboxProcess(
 		start(controller) {
 			controllers.stderr = controller;
 		},
+		pull() {
+			pendingPulls.stderr?.();
+		},
 	});
+	const enqueue = async (kind: 'stdout' | 'stderr', data: Uint8Array) => {
+		const controller = controllers[kind];
+		if (controller == null)
+			throw new Error(`Missing ${kind} stream controller`);
+		if (controller.desiredSize != null && controller.desiredSize <= 0) {
+			await new Promise<void>((resolve) => {
+				pendingPulls[kind] = resolve;
+			});
+			delete pendingPulls[kind];
+		}
+		controller.enqueue(data);
+	};
 
 	const drained = (async () => {
 		try {
@@ -285,10 +307,10 @@ function createSandboxProcess(
 						pid = event.pid;
 						break;
 					case 'stdout':
-						controllers.stdout?.enqueue(event.data);
+						await enqueue('stdout', event.data);
 						break;
 					case 'stderr':
-						controllers.stderr?.enqueue(event.data);
+						await enqueue('stderr', event.data);
 						break;
 					case 'exited':
 						exitCode = event.code;
@@ -300,6 +322,7 @@ function createSandboxProcess(
 		} catch (error) {
 			controllers.stdout?.error(error);
 			controllers.stderr?.error(error);
+			throw error;
 		} finally {
 			abortSignal?.removeEventListener('abort', onAbort);
 		}
