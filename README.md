@@ -2,6 +2,8 @@
 
 An [AI SDK harness](https://ai-sdk.dev) sandbox provider backed by local [microsandbox](https://microsandbox.dev) microVMs. Use it when an agent needs isolated commands and files plus a forwarded port for its bridge on a host that can run microsandbox.
 
+After the first npm release, install the package and its peers:
+
 ```sh
 npm install ai-microsandbox microsandbox @ai-sdk/harness
 ```

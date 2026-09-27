@@ -6,6 +6,8 @@ The machine running your app must be able to start microsandbox VMs. **The cloud
 
 ## Install
 
+After the first npm release, install the package and its peers:
+
 ```sh
 npm install ai-microsandbox microsandbox @ai-sdk/harness
 ```
