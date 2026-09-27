@@ -1,31 +1,14 @@
 # ai-microsandbox
 
-`HarnessV1SandboxProvider` implementation for [microsandbox](https://microsandbox.dev), a local-first microVM sandbox runtime, for use with [AI SDK](https://ai-sdk.dev) harnesses.
+An [AI SDK harness](https://ai-sdk.dev) sandbox provider backed by local [microsandbox](https://microsandbox.dev) microVMs. Use it when an agent needs isolated commands and files plus a forwarded port for its bridge on a host that can run microsandbox.
 
-## Install
-
-```bash
-npm i ai-microsandbox microsandbox @ai-sdk/harness
+```sh
+npm install ai-microsandbox microsandbox @ai-sdk/harness
 ```
 
-## Usage
+The microsandbox cloud backend cannot expose the bridge port. Credentials passed to an agent can be read inside its VM, and an auto-picked host port can rarely be claimed before microsandbox binds it.
 
-```ts
-import { createMicrosandbox } from 'ai-microsandbox';
-
-const provider = createMicrosandbox({ image: 'alpine' });
-
-const networkSession = await provider.createSession();
-const session = networkSession.restricted();
-
-await session.writeTextFile({ path: 'hello.txt', content: 'hi' });
-const { stdout } = await session.run({ command: 'cat hello.txt' });
-console.log(stdout); // "hi"
-
-await networkSession.stop();
-```
-
-See [`packages/ai-microsandbox`](packages/ai-microsandbox) for setup requirements, configuration, and the full guide.
+See the [package README](packages/ai-microsandbox/README.md) for a runnable example, configuration, recipes and limits.
 
 ## License
 
