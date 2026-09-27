@@ -10,6 +10,8 @@ permissions:
   pull-requests: write
   id-token: write # required for OIDC trusted publishing
 
+concurrency: ${{ github.workflow }}-${{ github.ref }}
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -19,12 +21,15 @@ jobs:
           fetch-depth: 0
       - uses: pnpm/action-setup@v6
       - uses: oven-sh/setup-bun@v2
-      - uses: actions/setup-node@v6
+        with:
+          bun-version: '1.3.14'
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
-          cache: pnpm
+          package-manager-cache: false
       - run: npm install -g npm@latest # trusted publishing needs npm >= 11.5.1
+        working-directory: ${{ runner.temp }}
       - run: pnpm install --frozen-lockfile
       - id: changesets
         uses: changesets/action@v1
