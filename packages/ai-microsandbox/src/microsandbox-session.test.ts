@@ -155,6 +155,34 @@ describe('MicrosandboxSession', () => {
 			for (let i = 0; i < 10; i++) await reader.read();
 			await process.wait();
 		});
+
+		it('unblocks a backpressured stream when stdout or stderr is cancelled', async () => {
+			for (const kind of ['stdout', 'stderr'] as const) {
+				const { sandbox, spies } = makeMockSandbox();
+				let consumed = 0;
+				const handle = {
+					async *[Symbol.asyncIterator](): AsyncGenerator<ExecEvent> {
+						for (let index = 0; index < 4; index++) {
+							consumed++;
+							yield { kind, data: new Uint8Array([index]) };
+						}
+						yield { kind: 'exited', code: 0 };
+					},
+					kill: mock(async () => {}),
+				};
+				spies.execStreamWith.mockResolvedValueOnce(
+					handle as unknown as ExecHandle,
+				);
+				const process = await new MicrosandboxSession(sandbox).spawn({
+					command: 'echo hi',
+				});
+				await Bun.sleep(10);
+				expect(consumed).toBeLessThan(4);
+				await process[kind].cancel();
+				expect(await process.wait()).toEqual({ exitCode: 0 });
+				expect(consumed).toBe(4);
+			}
+		});
 		it('runs the command as `sh -c <command>` and demuxes stdout/stderr/exit', async () => {
 			const { sandbox, spies } = makeMockSandbox();
 			const { handle } = makeExecHandle([

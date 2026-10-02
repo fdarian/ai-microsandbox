@@ -276,6 +276,11 @@ function createSandboxProcess(
 		stderr?: ReadableStreamDefaultController<Uint8Array>;
 	} = {};
 	const pendingPulls: { stdout?: () => void; stderr?: () => void } = {};
+	const cancelled = { stdout: false, stderr: false };
+	const cancel = (kind: 'stdout' | 'stderr') => {
+		cancelled[kind] = true;
+		pendingPulls[kind]?.();
+	};
 
 	const stdout = new ReadableStream<Uint8Array>({
 		start(controller) {
@@ -283,6 +288,9 @@ function createSandboxProcess(
 		},
 		pull() {
 			pendingPulls.stdout?.();
+		},
+		cancel() {
+			cancel('stdout');
 		},
 	});
 
@@ -293,8 +301,12 @@ function createSandboxProcess(
 		pull() {
 			pendingPulls.stderr?.();
 		},
+		cancel() {
+			cancel('stderr');
+		},
 	});
 	const enqueue = async (kind: 'stdout' | 'stderr', data: Uint8Array) => {
+		if (cancelled[kind]) return;
 		const controller = controllers[kind];
 		if (controller == null)
 			throw new Error(`Missing ${kind} stream controller`);
@@ -304,6 +316,7 @@ function createSandboxProcess(
 			});
 			delete pendingPulls[kind];
 		}
+		if (cancelled[kind]) return;
 		controller.enqueue(data);
 	};
 
@@ -325,12 +338,12 @@ function createSandboxProcess(
 						break;
 				}
 			}
-			controllers.stdout?.close();
-			controllers.stderr?.close();
+			if (!cancelled.stdout) controllers.stdout?.close();
+			if (!cancelled.stderr) controllers.stderr?.close();
 			return { success: true as const };
 		} catch (error) {
-			controllers.stdout?.error(error);
-			controllers.stderr?.error(error);
+			if (!cancelled.stdout) controllers.stdout?.error(error);
+			if (!cancelled.stderr) controllers.stderr?.error(error);
 			return { success: false as const, error };
 		} finally {
 			abortSignal?.removeEventListener('abort', onAbort);
