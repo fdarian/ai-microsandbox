@@ -160,7 +160,21 @@ export class MicrosandboxProvider implements HarnessV1SandboxProvider {
 		const sandbox = await withAuthenticationError(() =>
 			handle.connectOrStart(),
 		);
-		return MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: true });
+		try {
+			return await MicrosandboxNetworkSession.create({
+				sandbox,
+				ownsLifecycle: true,
+			});
+		} catch (error) {
+			if (sandbox.ownsLifecycle) {
+				try {
+					await sandbox.stop();
+				} catch {
+					// Preserve the failure that prevented resume.
+				}
+			}
+			throw error;
+		}
 	};
 }
 

@@ -302,6 +302,32 @@ describe('MicrosandboxProvider', () => {
 	});
 
 	describe('resumeSession', () => {
+		it('stops only a newly started VM when session initialization fails', async () => {
+			const { createMicrosandbox } = await importProvider();
+			for (const ownsLifecycle of [true, false]) {
+				const sandbox = Object.assign(makeFakeSandbox('resumed'), {
+					ownsLifecycle,
+				});
+				const failure = new Error('config failed');
+				(sandbox.config as ReturnType<typeof mock>).mockRejectedValueOnce(
+					failure,
+				);
+				(sandbox.stop as ReturnType<typeof mock>).mockRejectedValueOnce(
+					new Error('cleanup failed'),
+				);
+				mockSandboxStatics({
+					get: mock(async () => ({
+						connectOrStart: mock(async () => sandbox),
+					})),
+				});
+				await expect(
+					createMicrosandbox({ image: 'alpine' }).resumeSession({
+						sessionId: 'resumed',
+					}),
+				).rejects.toBe(failure);
+				expect(sandbox.stop).toHaveBeenCalledTimes(ownsLifecycle ? 1 : 0);
+			}
+		});
 		it('wraps the given sandbox without calling Sandbox.get for wrap-existing settings', async () => {
 			const getSpy = mock(() => {
 				throw new Error(
