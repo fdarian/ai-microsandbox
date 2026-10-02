@@ -149,22 +149,28 @@ export class MicrosandboxProvider implements HarnessV1SandboxProvider {
 		options.abortSignal?.throwIfAborted();
 
 		if ('sandbox' in this.settings && this.settings.sandbox != null) {
-			return MicrosandboxNetworkSession.create({
+			const session = await MicrosandboxNetworkSession.create({
 				sandbox: this.settings.sandbox,
 				ownsLifecycle: false,
 			});
+			options.abortSignal?.throwIfAborted();
+			return session;
 		}
 
 		const name = sessionSandboxName(options.sessionId);
 		const handle = await withAuthenticationError(() => Sandbox.get(name));
+		options.abortSignal?.throwIfAborted();
 		const sandbox = await withAuthenticationError(() =>
 			handle.connectOrStart(),
 		);
 		try {
-			return await MicrosandboxNetworkSession.create({
+			options.abortSignal?.throwIfAborted();
+			const session = await MicrosandboxNetworkSession.create({
 				sandbox,
 				ownsLifecycle: true,
 			});
+			options.abortSignal?.throwIfAborted();
+			return session;
 		} catch (error) {
 			if (sandbox.ownsLifecycle) {
 				try {

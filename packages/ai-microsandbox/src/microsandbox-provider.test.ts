@@ -302,6 +302,41 @@ describe('MicrosandboxProvider', () => {
 	});
 
 	describe('resumeSession', () => {
+		it('rechecks abort after get, connect, and session initialization', async () => {
+			const { createMicrosandbox } = await importProvider();
+			for (const stage of ['get', 'connect', 'config'] as const) {
+				const controller = new AbortController();
+				const reason = new Error(`aborted during ${stage}`);
+				const sandbox = Object.assign(makeFakeSandbox('resumed'), {
+					ownsLifecycle: true,
+				});
+				const config = sandbox.config as ReturnType<typeof mock>;
+				if (stage === 'config')
+					config.mockImplementationOnce(async () => {
+						controller.abort(reason);
+						return { runtime: { workdir: '/root' }, network: { ports: [] } };
+					});
+				const connectOrStart = mock(async () => {
+					if (stage === 'connect') controller.abort(reason);
+					return sandbox;
+				});
+				mockSandboxStatics({
+					get: mock(async () => {
+						if (stage === 'get') controller.abort(reason);
+						return { connectOrStart };
+					}),
+				});
+				await expect(
+					createMicrosandbox({ image: 'alpine' }).resumeSession({
+						sessionId: 'resumed',
+						abortSignal: controller.signal,
+					}),
+				).rejects.toBe(reason);
+				expect(connectOrStart).toHaveBeenCalledTimes(stage === 'get' ? 0 : 1);
+				expect(config).toHaveBeenCalledTimes(stage === 'config' ? 1 : 0);
+				expect(sandbox.stop).toHaveBeenCalledTimes(stage === 'get' ? 0 : 1);
+			}
+		});
 		it('stops only a newly started VM when session initialization fails', async () => {
 			const { createMicrosandbox } = await importProvider();
 			for (const ownsLifecycle of [true, false]) {
