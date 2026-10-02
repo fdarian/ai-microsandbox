@@ -79,6 +79,17 @@ describe('MicrosandboxProvider', () => {
 	});
 
 	describe('createSession — create-new', () => {
+		it('rejects a relative workDir when settings are accepted', async () => {
+			const { createMicrosandbox, MicrosandboxProvider } =
+				await importProvider();
+			expect(() =>
+				createMicrosandbox({ image: 'alpine', workDir: 'relative' }),
+			).toThrow(/absolute POSIX path/);
+			expect(
+				() =>
+					new MicrosandboxProvider({ image: 'alpine', workDir: 'relative' }),
+			).toThrow(/absolute POSIX path/);
+		});
 		it('derives a deterministic name from sessionId and applies image/configure', async () => {
 			const sandbox = makeFakeSandbox('ai-sdk-harness-session-abc123');
 			const { builder, spies } = makeFakeBuilder(sandbox);

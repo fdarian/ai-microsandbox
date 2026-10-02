@@ -48,6 +48,17 @@ function makeMockSandbox(
 
 describe('MicrosandboxNetworkSession', () => {
 	describe('create', () => {
+		it('rejects a relative workdir reported by the image', async () => {
+			const { sandbox } = makeMockSandbox({
+				config: {
+					runtime: { workdir: 'relative' },
+					network: { ports: [] },
+				},
+			});
+			await expect(
+				MicrosandboxNetworkSession.create({ sandbox, ownsLifecycle: false }),
+			).rejects.toThrow(/relative working directory/);
+		});
 		it('reads defaultWorkingDirectory from config.runtime.workdir and ports from config.network.ports', async () => {
 			const { sandbox } = makeMockSandbox();
 			const session = await MicrosandboxNetworkSession.create({

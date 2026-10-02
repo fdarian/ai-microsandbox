@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
+import { posix } from 'node:path';
 import {
 	HarnessSandboxAuthenticationError,
 	type HarnessV1NetworkSandboxSession,
@@ -66,7 +67,17 @@ export class MicrosandboxProvider implements HarnessV1SandboxProvider {
 	readonly specificationVersion = 'harness-sandbox-v1' as const;
 	readonly providerId = PROVIDER_ID;
 
-	constructor(private readonly settings: MicrosandboxSettings) {}
+	constructor(private readonly settings: MicrosandboxSettings) {
+		if (
+			'workDir' in settings &&
+			settings.workDir != null &&
+			!posix.isAbsolute(settings.workDir)
+		) {
+			throw new Error(
+				`workDir must be an absolute POSIX path (received "${settings.workDir}").`,
+			);
+		}
+	}
 
 	createSession = async (options?: {
 		sessionId?: string;

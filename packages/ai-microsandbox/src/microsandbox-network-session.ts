@@ -1,3 +1,4 @@
+import { posix } from 'node:path';
 import {
 	HarnessCapabilityUnsupportedError,
 	type HarnessV1NetworkSandboxSession,
@@ -68,6 +69,11 @@ export class MicrosandboxNetworkSession
 	}) {
 		const workdir =
 			input.workDir ?? input.config.runtime?.workdir ?? '/workspace';
+		if (!posix.isAbsolute(workdir)) {
+			throw new Error(
+				`microsandbox sandbox "${input.sandbox.name}" has a relative working directory "${workdir}"; an absolute POSIX path is required.`,
+			);
+		}
 		super(input.sandbox, workdir);
 		this.ownsLifecycle = input.ownsLifecycle;
 		this.id = input.sandbox.name;
@@ -114,6 +120,11 @@ export class MicrosandboxNetworkSession
 		ownsLifecycle: boolean;
 		workDir?: string;
 	}): Promise<MicrosandboxNetworkSession> {
+		if (input.workDir != null && !posix.isAbsolute(input.workDir)) {
+			throw new Error(
+				`workDir must be an absolute POSIX path (received "${input.workDir}").`,
+			);
+		}
 		const config = (await input.sandbox.config()) as MicrosandboxRuntimeConfig;
 		if (
 			input.ownsLifecycle &&
