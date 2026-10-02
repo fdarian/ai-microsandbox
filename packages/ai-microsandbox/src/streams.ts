@@ -30,16 +30,25 @@ export async function pumpReadableStreamToSink(
 	sink: WritableSink,
 	abortSignal?: AbortSignal,
 ): Promise<void> {
-	const reader = stream.getReader();
 	try {
-		while (true) {
-			abortSignal?.throwIfAborted();
-			const { value, done } = await reader.read();
-			if (done) break;
-			if (value != null) await sink.write(value);
+		const reader = stream.getReader();
+		try {
+			while (true) {
+				abortSignal?.throwIfAborted();
+				const result = await reader.read();
+				if (result.done) break;
+				await sink.write(result.value);
+			}
+		} finally {
+			reader.releaseLock();
 		}
-	} finally {
-		reader.releaseLock();
+	} catch (error) {
+		try {
+			await sink.close();
+		} catch {
+			// The stream or write failure is the cause to report.
+		}
+		throw error;
 	}
 	await sink.close();
 }
